@@ -25,6 +25,9 @@ using LinearAlgebra
 # and e_G the orthonormal basis e_G(x) = e^iGx / sqrt(|Γ|), with Γ the unit cell
 # We evaluate the TF equation in real space through FFTs
 
+# Note, that it is the convention to normalise e_G(x) = e^iGx / sqrt(|Γ|),
+# which makes them orthornormal, such that a mass matrix can be avoided.
+
 """
 State of the calculation
 """
@@ -97,7 +100,7 @@ function Structure(A, atoms, Z, Ecut; fft_supersampling=2.)
 
     # Figure out upper bound n_max on number of basis functions for any dimension
     # Want |B*(i j k)|^2 <= Ecut
-    n_max = ceil(Int, sqrt(Ecut) / opnorm(B))  # TODO Why spectral norm?
+    n_max = ceil(Int, sqrt(Ecut) / opnorm(B))
 
     # Running index of selected G vectors
     ig = 1
@@ -124,7 +127,8 @@ function Structure(A, atoms, Z, Ecut; fft_supersampling=2.)
     n_G = length(Gs)
 
     # Setup FFT
-    # TODO Why? Ensure a power of 2 for fast FFTs
+    # Ensure a power of 2 for fast FFTs (because of the tree-like
+    # divide and conquer structure of the FFT)2
     fft_size = nextpow(2, fft_supersampling * (2n_max + 1))
     G_to_fft = zeros(SVector{3, Int}, n_G)
     for ig in 1:n_G
@@ -155,7 +159,6 @@ function pot_atom_grid(S::Structure)
         for ig = 1:S.n_G
             if ig != S.idx_DC
                 G = S.Gs[ig]
-                # TODO Check I get it right
                 pot[ig] -= 4π * S.Z * V_cell * cis(dot(G, R)) / sum(abs2, G)
             end
         end
@@ -186,10 +189,11 @@ function to_real(S::Structure, ψ_fourier)
     for ig=1:S.n_G
         ψ_real[S.G_to_fft[ig]...] = ψ_fourier[ig]
     end
-    mul!(ψ_real, S.ifft_plan, ψ_real)  # TODO must not be aliased
-    # TODO
-    # IFFT has a normalization factor of 1/length(ψ)
-    # so adjust to the fact that fft_size != sqrt(unit_cell_volume)
+    ψ_real = S.ifft_plan * ψ_real
+    # IFFT has a normalization factor of 1/length(ψ),
+    # but the normalisation convention used in this code is
+    # e_G(x) = e^iGx / sqrt(|Γ|), so we need to use the factor
+    # below in order to match both conventions.
     ψ_real .*= (length(ψ_real) / sqrt(S.unit_cell_volume))
     @assert norm(imag(ψ_real)) < 1e-10
     real(ψ_real)
@@ -199,12 +203,15 @@ end
 Transform the wave function from real space to Fourier space
 """
 function to_fourier(S::Structure, ψ_real)
-    ψ_fourier_extended = S.fft_plan*ψ_real
-    ψ_fourier = zeros(ComplexF64,S.n_G)
+    # Do FFT on the full FFT plan, but only keep within
+    # the n_G from the kinetic energy cutoff -> Lossy Compression of data
+    ψ_fourier_extended = S.fft_plan * ψ_real
+    ψ_fourier = zeros(ComplexF64, S.n_G)
     for ig=1:S.n_G
         ψ_fourier[ig] = ψ_fourier_extended[S.G_to_fft[ig]...]
     end
-    ψ_fourier .*= (sqrt(S.unit_cell_volume)/length(ψ_real))
+    # Again adjust normalisation as in to_real
+    ψ_fourier .*= (sqrt(S.unit_cell_volume) / length(ψ_real))
 end
 
 """
@@ -232,7 +239,6 @@ function computeρ(S::Structure, Vtot, N, tol)
         mean(ρguess) * unit_cell_volume
     end
 
-    # TODO Different method? Laxer convergence criterion?
     # Use defined functions to find the Fermi level
     # giving the requested number of particles
     εF = find_zero(ε -> compute_n_elec!(ε, ρguess, Vtot, S.unit_cell_volume) - N, 0.0,
@@ -249,15 +255,22 @@ VextF   external potential in Fourier space
 """
 function nextρF(S::Structure, VextF, ρF, N, tol)
     VtotF = VextF + pot_hartree(S, ρF)
+    # Not sure why this is the case:
     @assert abs(VtotF[S.idx_DC]) < 1e-10  # TODO Why?
 
     Vtot = to_real(S, VtotF)
     ρ = computeρ(S, Vtot, N, tol)
     @assert all(ρ .>= 0)
-
     newρF = to_fourier(S, ρ)
-    @assert abs(newρF[S.idx_DC] - N / sqrt(S.unit_cell_volume)) < tol  # TODO Why?
-    @assert norm(imag(newρF)) < 1e-10 # only true because of inversion symmetry
+
+    # Because of charge neutrality:
+    #     DC component of newρF = mean average of newρF = N / |Γ|
+    # since the normalisation convention we use is e_G = exp(-irG) / sqrt(|Γ|),
+    # this implies newρF[S.idx_DC] = N / |Γ| * sqrt(|Γ|) = N / sqrt(|Γ|)
+    @assert abs(newρF[S.idx_DC] - N / sqrt(S.unit_cell_volume)) < tol
+
+    # Because of inversion symmetry in the system:
+    @assert norm(imag(newρF)) < 1e-10
     real(newρF)
 end
 
@@ -283,29 +296,20 @@ function solve_TF_pc(L, Z, Ecut)
 
     # Start from a constant density
     # We want ∫ C_DC * e^{0} \D G = N
-    # Thus C_DC (DC Fourier coefficient) = N / ∫ e^{0} \D G = N / sqrt(|Γ|)
-    # TODO Why square root?
+    # Thus C_DC (DC Fourier coefficient) = N / ∫ e^{0} \D G = N / sqrt(|Γ|),
+    # because of our normalisation convention.
     ρ0F = zeros(S.n_G)
     ρ0F[S.idx_DC] = N / sqrt(S.unit_cell_volume)
     @assert mean(to_real(S, ρ0F)) * S.unit_cell_volume ≈ N
 
-    # The payload function to be solved for with NLsolve
-    payload!(residual, ρF) = (residual .= nextρF(S, Vext, ρF, N, tol) .- ρF)
+    # The function to be solved for with NLsolve
+    residual!(residual, ρF) = (residual .= nextρF(S, Vext, ρF, N, tol) .- ρF)
 
-    # TODO Häh?
     # work around https://github.com/JuliaNLSolvers/NLsolve.jl/issues/202
-    od = OnceDifferentiable(payload!, identity, ρ0F, ρ0F, [])
+    od = OnceDifferentiable(residual!, identity, ρ0F, ρ0F, [])
     ρF  = nlsolve(od, ρ0F, method=:anderson, m=5, xtol=tol,
                  ftol=0.0, show_trace=true).zero
 
-    # TODO filtered / unfiltered
-    # # method 1
-    # # energy from the filtered ρ
-    # return real(mean(complex(to_real(S,ρ)).^(5/3)) * S.unit_cell_volume)
-
-    # method 2
-    # extract energy from the unfiltered ρ
-    # computationally suboptimal but not critical
     VtotF = Vext + pot_hartree(S, ρF)
     Vtot = to_real(S, VtotF)
     ρ = computeρ(S, Vtot, N, tol)
@@ -313,22 +317,23 @@ function solve_TF_pc(L, Z, Ecut)
 end
 
 function main()
-    Ecut = 5000
+    Ecut = 50
     L = 1.0
     Zs = 1:10
 
-    Es = empty(Zs, Float64)
+    Ekins = empty(Zs, Float64)
     ρs = empty(Zs, Array{Float64})
+    Vtotmids = empty(Zs, Array{Float64})
     Vtots = empty(Zs, Array{Float64})
     for Z in Zs
         S, ρ, Vtot = solve_TF_pc(L, Z, Ecut)
         midpoint = ceil(Int, S.fft_size / 2)
 
-        # TODO only kinetic energy, right?
-        E = mean(ρ.^(5/3)) * S.unit_cell_volume
-        push!(Es, E)
+        Ekin = mean(ρ.^(5/3)) * S.unit_cell_volume
+        push!(Ekins, Ekin)
         push!(ρs, ρ[1, :, 1])
         push!(Vtots, Vtot[1, :, 1])
+        push!(Vtotmids, Vtot[midpoint, :, midpoint])
     end
 
     # Plot potential energy
@@ -336,6 +341,7 @@ function main()
     title("Potential energy (real space)")
     for (i, Z) in enumerate(Zs)
         plot(Vtots[i], "-x", label="Z=$(@sprintf("%.2f", Z))")
+        plot(Vtotmids[i], "-x", label="Z=$(@sprintf("%.2f", Z)) (mid)")
     end
     legend()
     show()
@@ -349,13 +355,14 @@ function main()
     legend()
     show()
 
-    # TODO Hä?
+    # Compare against the known exact assymptotics of the
+    # Thomas-Fermi-Atom with respect to Z
     mat = hcat(ones(length(Zs)), Zs .^ (7/3))
-    a, b = mat \ Es
-    relabs = sqrt(sum(abs2, Es .- (a .+ b .* Zs .^ (7/3))) / var(Es))
+    a, b = mat \ Ekins
+    relabs = sqrt(sum(abs2, Ekins .- (a .+ b .* Zs .^ (7/3))) / var(Ekins))
 
     figure()
-    plot(Zs .^ (7/3), Es, "-x")
+    plot(Zs .^ (7/3), Ekins, "-x")
     plot(Zs .^ (7/3), a .+ b .* Zs .^ (7/3), "-")
     title("L=$L, Ecut=$Ecut, $(@sprintf("%.2f",a)) + $(@sprintf("%.2f",b)) * Z^{7/3}," *
           "relerr=$(@sprintf("%.4f",relabs))")
