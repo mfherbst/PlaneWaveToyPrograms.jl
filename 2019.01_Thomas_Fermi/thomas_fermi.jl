@@ -167,6 +167,26 @@ function pot_atom_grid(S::Structure)
 end
 
 """
+Compute the external potential induced by an atom grid,
+where the repulsion acts as 1/|G|^4 (in Fourier space)
+"""
+function pot_atom_grid4(S::Structure)
+    abs4(x) = abs2(x)^2
+    V_cell = sqrt(S.unit_cell_volume)
+    pot = zeros(ComplexF64, S.n_G)
+    for iatom = 1:length(S.atoms)
+        R = S.atoms[iatom]
+        for ig = 1:S.n_G
+            if ig != S.idx_DC
+                G = S.Gs[ig]
+                pot[ig] -= 4π * S.Z * V_cell * cis(dot(G, R)) / sum(abs4, G)
+            end
+        end
+    end
+    pot
+end
+
+"""
 Computes the Hartree potential associated with ρ (in Fourier space)
 """
 function pot_hartree(S::Structure, ρ)
@@ -256,7 +276,7 @@ VextF   external potential in Fourier space
 function nextρF(S::Structure, VextF, ρF, N, tol)
     VtotF = VextF + pot_hartree(S, ρF)
     # Not sure why this is the case:
-    @assert abs(VtotF[S.idx_DC]) < 1e-10  # TODO Why?
+    @assert abs(VtotF[S.idx_DC]) < 1e-10
 
     Vtot = to_real(S, VtotF)
     ρ = computeρ(S, Vtot, N, tol)
@@ -316,24 +336,21 @@ function solve_TF_pc(L, Z, Ecut)
     return S, ρ, Vtot
 end
 
-function main()
-    Ecut = 50
+function plot_dependency_on_Z()
+    Ecut = 5000
     L = 1.0
-    Zs = 1:10
+    Zs = 1:2:20
 
     Ekins = empty(Zs, Float64)
     ρs = empty(Zs, Array{Float64})
-    Vtotmids = empty(Zs, Array{Float64})
     Vtots = empty(Zs, Array{Float64})
     for Z in Zs
         S, ρ, Vtot = solve_TF_pc(L, Z, Ecut)
-        midpoint = ceil(Int, S.fft_size / 2)
 
         Ekin = mean(ρ.^(5/3)) * S.unit_cell_volume
         push!(Ekins, Ekin)
         push!(ρs, ρ[1, :, 1])
         push!(Vtots, Vtot[1, :, 1])
-        push!(Vtotmids, Vtot[midpoint, :, midpoint])
     end
 
     # Plot potential energy
@@ -341,7 +358,6 @@ function main()
     title("Potential energy (real space)")
     for (i, Z) in enumerate(Zs)
         plot(Vtots[i], "-x", label="Z=$(@sprintf("%.2f", Z))")
-        plot(Vtotmids[i], "-x", label="Z=$(@sprintf("%.2f", Z)) (mid)")
     end
     legend()
     show()
@@ -367,12 +383,68 @@ function main()
     title("L=$L, Ecut=$Ecut, $(@sprintf("%.2f",a)) + $(@sprintf("%.2f",b)) * Z^{7/3}," *
           "relerr=$(@sprintf("%.4f",relabs))")
     show()
+end
 
+function plot_dependency_on_Ecut()
+    Ecuts = 50 * collect(1:4:200)
+    L = 1.0
+    Z = 5
+
+    Ekins = empty(Ecuts, Float64)
+    ρs = empty(Ecuts, Array{Float64})
+    Vtots = empty(Ecuts, Array{Float64})
+    n_Gs = empty(Ecuts, Int)
+    for Ecut in Ecuts
+        S, ρ, Vtot = solve_TF_pc(L, Z, Ecut)
+
+        Ekin = mean(ρ.^(5/3)) * S.unit_cell_volume
+        push!(Ekins, Ekin)
+        push!(ρs, ρ[1, :, 1])
+        push!(Vtots, Vtot[1, :, 1])
+        push!(n_Gs, S.n_G)
+    end
+
+    # Compute the grid point coordinates
+    grid_points = [collect(1:length(ρ)) / length(ρ) for (i, ρ) in enumerate(ρs)]
+
+    # Plot energies
+    figure()
+    title("Kinetic energy vs n_G")
+    semilogy(n_Gs[1:end-1], abs.(Ekins[1:end-1] .- Ekins[end]), "-x")
+    legend()
+    show()
+
+    # Plot potential energy
+    figure()
+    title("Potential energy (real space)")
+    for (i, Ecut) in enumerate(Ecuts)
+        plot(grid_points[i], Vtots[i], "-x", label="Ecut=$Ecut")
+    end
+    legend()
+    show()
+
+    # Plot density
+    figure()
+    title("Density (real space)")
+    for (i, Ecut) in enumerate(Ecuts)
+        plot(grid_points[i], ρs[i], "-x", label="Ecut=$Ecut")
+    end
+    legend()
+    show()
+
+    println("Final kinetic energy is $(Ekins[end])")
+end
+
+function run_profiler()
     # using Profile
     # using ProfileView
     # Profile.clear()
     # @profile solve_TF_pc(1,1,10000)
     # ProfileView.view()
+end
+
+function main()
+    plot_dependency_on_Ecut()
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
