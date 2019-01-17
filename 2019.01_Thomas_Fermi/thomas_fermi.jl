@@ -209,7 +209,7 @@ function to_real(S::Structure, ψ_fourier)
     for ig=1:S.n_G
         ψ_real[S.G_to_fft[ig]...] = ψ_fourier[ig]
     end
-    ψ_real = S.ifft_plan * ψ_real
+    ψ_real = S.ifft_plan * ψ_real  # Note: This destroys data in ψ_real
     # IFFT has a normalization factor of 1/length(ψ),
     # but the normalisation convention used in this code is
     # e_G(x) = e^iGx / sqrt(|Γ|), so we need to use the factor
@@ -223,6 +223,9 @@ end
 Transform the wave function from real space to Fourier space
 """
 function to_fourier(S::Structure, ψ_real)
+    # This is needed, because S.fft_plan destroys data in ψ_real
+    ψ_real = copy(ψ_real)
+
     # Do FFT on the full FFT plan, but only keep within
     # the n_G from the kinetic energy cutoff -> Lossy Compression of data
     ψ_fourier_extended = S.fft_plan * ψ_real
