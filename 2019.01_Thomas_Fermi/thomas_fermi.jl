@@ -300,16 +300,16 @@ Solve the TF equation in a primitive cubic crystal with an atom of charge Z
 Return the total potential and final electron density
 on the grid in real space.
 """
-function solve_TF_pc(L, Z, Ecut)
+function solve_TF_pc(L, Z, Ecut; pot_external=pot_atom_grid)
     A = L * Matrix(Diagonal(ones(3)))
     atoms = [[0.0,0.0,0.0]]
     N = Z*length(atoms)
     tol = 1e-10
 
     S = Structure(A, atoms, Z, Ecut; fft_supersampling=2.)
-    println("Computing with Z=$Z, fft_size=$(S.fft_size)")
+    println("Computing with Z=$Z, fft_size=$(S.fft_size), pot_external=$(pot_atom_grid)")
 
-    Vext = pot_atom_grid(S)
+    Vext = pot_external(S)
 
     # Test we did not mess up Fourier transform (should be in a test suite)
     @assert to_fourier(S, to_real(S, Vext)) ≈ Vext
@@ -345,7 +345,7 @@ function plot_dependency_on_Z()
     ρs = empty(Zs, Array{Float64})
     Vtots = empty(Zs, Array{Float64})
     for Z in Zs
-        S, ρ, Vtot = solve_TF_pc(L, Z, Ecut)
+        S, ρ, Vtot = solve_TF_pc(L, Z, Ecut; pot_external=pot_atom_grid)
 
         Ekin = mean(ρ.^(5/3)) * S.unit_cell_volume
         push!(Ekins, Ekin)
@@ -386,7 +386,8 @@ function plot_dependency_on_Z()
 end
 
 function plot_dependency_on_Ecut()
-    Ecuts = 50 * collect(1:4:200)
+    Ecuts = [100,5000] # * collect(1:4:200)
+    # Ecuts = 50 * collect(1:4:50)
     L = 1.0
     Z = 5
 
@@ -395,7 +396,7 @@ function plot_dependency_on_Ecut()
     Vtots = empty(Ecuts, Array{Float64})
     n_Gs = empty(Ecuts, Int)
     for Ecut in Ecuts
-        S, ρ, Vtot = solve_TF_pc(L, Z, Ecut)
+        S, ρ, Vtot = solve_TF_pc(L, Z, Ecut; pot_external=pot_atom_grid4)
 
         Ekin = mean(ρ.^(5/3)) * S.unit_cell_volume
         push!(Ekins, Ekin)
@@ -420,6 +421,15 @@ function plot_dependency_on_Ecut()
     for (i, Ecut) in enumerate(Ecuts)
         plot(grid_points[i], Vtots[i], "-x", label="Ecut=$Ecut")
     end
+
+    # Super rough fit to get an idea of the cusp
+    before = grid_points[end] .<= 0.5
+    after = grid_points[end] .> 0.5
+    α = (Vtots[end][4] - Vtots[end][3]) / grid_points[end][1]
+    β = Vtots[end][1]
+    fit = β .+ α .* abs.(grid_points[end]) .* before .+
+               α .* abs.(grid_points[end] .- 1) .* after
+    plot(grid_points[end], fit, "-", label="Ref")
     legend()
     show()
 
