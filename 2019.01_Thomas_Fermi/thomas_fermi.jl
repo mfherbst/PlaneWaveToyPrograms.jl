@@ -300,19 +300,19 @@ Solve the TF equation in a primitive cubic crystal with an atom of charge Z
 Return the total potential and final electron density
 on the grid in real space.
 """
-function solve_TF_pc(L, Z, Ecut; pot_external=pot_atom_grid)
+function solve_TF_pc(L, Z, Ecut; pot_external=pot_atom_grid, fft_supersampling=2.)
     A = L * Matrix(Diagonal(ones(3)))
     atoms = [[0.0,0.0,0.0]]
     N = Z*length(atoms)
     tol = 1e-10
 
-    S = Structure(A, atoms, Z, Ecut; fft_supersampling=2.)
+    S = Structure(A, atoms, Z, Ecut; fft_supersampling=fft_supersampling)
     println("Computing with Z=$Z, fft_size=$(S.fft_size), pot_external=$(pot_atom_grid)")
 
-    Vext = pot_external(S)
+    VextF = pot_external(S)
 
     # Test we did not mess up Fourier transform (should be in a test suite)
-    @assert to_fourier(S, to_real(S, Vext)) ≈ Vext
+    @assert to_fourier(S, to_real(S, VextF)) ≈ VextF
 
     # Start from a constant density
     # We want ∫ C_DC * e^{0} \D G = N
@@ -323,14 +323,14 @@ function solve_TF_pc(L, Z, Ecut; pot_external=pot_atom_grid)
     @assert mean(to_real(S, ρ0F)) * S.unit_cell_volume ≈ N
 
     # The function to be solved for with NLsolve
-    residual!(residual, ρF) = (residual .= nextρF(S, Vext, ρF, N, tol) .- ρF)
+    residual!(residual, ρF) = (residual .= nextρF(S, VextF, ρF, N, tol) .- ρF)
 
     # work around https://github.com/JuliaNLSolvers/NLsolve.jl/issues/202
     od = OnceDifferentiable(residual!, identity, ρ0F, ρ0F, [])
     ρF  = nlsolve(od, ρ0F, method=:anderson, m=5, xtol=tol,
                  ftol=0.0, show_trace=true).zero
 
-    VtotF = Vext + pot_hartree(S, ρF)
+    VtotF = VextF + pot_hartree(S, ρF)
     Vtot = to_real(S, VtotF)
     ρ = computeρ(S, Vtot, N, tol)
     return S, ρ, Vtot
@@ -386,8 +386,7 @@ function plot_dependency_on_Z()
 end
 
 function plot_dependency_on_Ecut()
-    Ecuts = [100,5000] # * collect(1:4:200)
-    # Ecuts = 50 * collect(1:4:50)
+    Ecuts = 50 * collect(1:4:200)
     L = 1.0
     Z = 5
 
@@ -443,6 +442,33 @@ function plot_dependency_on_Ecut()
     show()
 
     println("Final kinetic energy is $(Ekins[end])")
+end
+
+function plot_dependency_on_supersampling()
+    Ecut = 5000
+    L = 1.0
+    Z = 5
+    supersamplings = [1., 2., 3., 6.]
+
+    Vtots = empty(supersamplings, Array{Float64})
+    for ssample in supersamplings
+        S, ρ, Vtot = solve_TF_pc(L, Z, Ecut; pot_external=pot_atom_grid4,
+                                 fft_supersampling=ssample)
+        push!(Vtots, Vtot[1, :, 1])
+    end
+
+    # Compute the grid point coordinates
+    grid_points = [collect(1:length(V)) / length(V)
+                   for (i, V) in enumerate(Vtots)]
+
+    # Plot potential energy
+    figure()
+    title("Potential energy (real space)")
+    for (i, ssample) in enumerate(supersamplings)
+        plot(grid_points[i], Vtots[i], "-x", label="fft_supersampling=$ssample")
+    end
+    legend()
+    show()
 end
 
 function run_profiler()
