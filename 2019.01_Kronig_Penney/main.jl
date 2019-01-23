@@ -5,14 +5,14 @@ using LinearAlgebra
 # V = Z \sum δ_{an}
 # in a supercell of size aL
 
-# This does not use k points to be able to treat defects
+# This does not use k points sampling, but a supercell approach to be able to treat defects
 # We discretize in a basis of plane waves |q> = e^iqx / sqrt(aL), q = 2π/a * (N, ..., -1/L,0,1/L, ..., N)
 
-const Z = -5.0 #potential strength
-const Zdef = +0.0 # defect strength
-const a = 1 #lattice constant
-const N = 20 #number of plane waves per unit cell
-const L = 20 #supercell size
+const Z = -5.0     # potential strength
+const Zdef = +0.0  # defect strength
+const a = 1        # lattice constant
+const N = 50       # number of plane waves per unit cell
+const L = 20       # supercell size
 
 # all plane waves that can fit in a box of size L
 const qrange = 2π/a*(-N:(1/L):N)
