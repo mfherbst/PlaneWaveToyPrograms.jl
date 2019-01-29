@@ -101,7 +101,7 @@ function kinetic(S::Data, k)
     for ig in 1:S.n_G, jg in 1:S.n_G
         # Kinetic energy
         if ig == jg
-            T[ig, jg] = sum(abs2, k) / 2 - sum(abs2, S.Gs[ig]) / 2
+            T[ig, jg] = sum(abs2, k) / 2 + sum(abs2, S.Gs[ig]) / 2 + dot(k, S.Gs[ig]) / 2
         end
     end
     T
@@ -109,13 +109,15 @@ end
 
 
 function potential(S::Data, k, τ)
+    RyToHartree = 1/2
+
     # Set Fourier terms for potential
     V_sym = Dict{Int64,Float64}()
     V_asym = Dict{Int64,Float64}()
     if S.Z == 14  # Si
-        V_sym[3]  = -0.21
-        V_sym[8]  = 0.04
-        V_sym[11] = 0.08
+        V_sym[3]  = -0.21 * RyToHartree
+        V_sym[8]  = 0.04 * RyToHartree
+        V_sym[11] = 0.08 * RyToHartree
     else
         throw(ErrorException("Z == $(S.Z) not implemented"))
     end
@@ -143,13 +145,15 @@ function potential_real(S::Data, τ, xs)
     Evaluate potential on a set of real points
     """
 
+    RyToHartree = 1/2
+
     # Set Fourier terms for potential
     V_sym = Dict{Int64,Float64}()
     V_asym = Dict{Int64,Float64}()
     if S.Z == 14  # Si
-        V_sym[3]  = -0.21
-        V_sym[8]  = 0.04
-        V_sym[11] = 0.08
+        V_sym[3]  = -0.21 * RyToHartree
+        V_sym[8]  = 0.04 * RyToHartree
+        V_sym[11] = 0.08 * RyToHartree
     else
         throw(ErrorException("Z == $(S.Z) not implemented"))
     end
@@ -210,10 +214,34 @@ function main()
     L = 1.0
     Z = 14
     Ecut = 1000
-    ks = map(x -> [0,0,x], 0:0.5:2π / L)
+    kdelta = 0.1
+
+    high_sym_points = [
+        [0.5, 0.5, 0.5],    # L point
+        [0.0, 0.0, 0.0],    # G point
+        [0.0, 0.0, 1.0],    # X point
+        [0.5, 0.0, 1.0],    # W point
+        [0.75, 0.0, 0.75],  # K point
+        [0.0, 0.0, 0.0]     # L point
+    ]
+    ks = []
+    for i in 2:size(high_sym_points, 1)
+        linear(x) = high_sym_points[i - 1] +
+            x * (high_sym_points[i] - high_sym_points[i - 1])
+        ks = vcat(ks, map(x -> 2π * linear(x), 0:kdelta:1))
+    end
+    println("Considered k points:")
+    println(ks)
+    println("-- -- -- -- -- -- --")
+    # Other sampling:
+    #   - Monkhorst-Pack mesh (H. J. Monkhorst and J. D. Pack, Phys. Rev. B 13, 5188 (1976). )
+    #   - Chadi and Cohen
     λs, vs = compute_diamond_structure(L, Z, Ecut, ks)
 
+    close()
+
     # --
+    HartreeToEv = 1 / 27.21138602
     a = 1.
     A = L * Matrix(Diagonal(ones(3)))
     τ = L / 8 .* @SVector[a, a, a]
@@ -224,15 +252,13 @@ function main()
     V = potential_real(S, τ, xs)
     figure()
     title("Potential along (x,x,x)")
-    plot(xabs, V)
+    plot(xabs, HartreeToEv .* V)
     show()
     # --
 
-    return
-    kabs = map(x -> sqrt(sum(abs2, x)), ks)
     figure()
-    for i in [1,10]
-        plot(kabs, map(x -> x[i], λs), label="Band $i")
+    for i in 1:10
+        plot(HartreeToEv .* map(x -> x[i], λs), label="Band $i")
     end
     legend()
     show()
