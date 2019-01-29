@@ -101,7 +101,7 @@ function kinetic(S::Data, k)
     for ig in 1:S.n_G, jg in 1:S.n_G
         # Kinetic energy
         if ig == jg
-            T[ig, jg] = sum(abs2, k) / 2 + sum(abs2, S.Gs[ig]) / 2 + dot(k, S.Gs[ig]) / 2
+            T[ig, jg] = sum(abs2, k) / 2 + sum(abs2, S.Gs[ig]) / 2 - dot(k, S.Gs[ig]) / 2
         end
     end
     T
