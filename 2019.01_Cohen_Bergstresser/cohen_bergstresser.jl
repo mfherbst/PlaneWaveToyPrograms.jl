@@ -218,11 +218,12 @@ function main()
 
     high_sym_points = [
         [0.5, 0.5, 0.5],    # L point
-        [0.0, 0.0, 0.0],    # G point
+        [0.0, 0.0, 0.0],    # Γ point
         [0.0, 0.0, 1.0],    # X point
-        [0.5, 0.0, 1.0],    # W point
+        #[0.5, 0.0, 1.0],    # W point
         [0.75, 0.0, 0.75],  # K point
-        [0.0, 0.0, 0.0]     # L point
+        [0.0, 0.0, 0.0],    # Γ point
+        #[0.5, 0.5, 0.5]     # L point
     ]
     ks = []
     for i in 2:size(high_sym_points, 1)
