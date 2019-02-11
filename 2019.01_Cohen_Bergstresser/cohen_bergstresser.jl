@@ -3,6 +3,7 @@
 using StaticArrays
 using LinearAlgebra
 using PyPlot
+include("visualise.jl")
 
 
 """
@@ -62,7 +63,7 @@ atoms  Atom positions
 Zs     Atom changes
 """
 function Data(A, atoms, Z, Ecut)
-    B = 2π * inv(A')
+    B = 2π * inv(Array(A'))
     unit_cell_volume = det(A)
 
     # Fill G_coords
@@ -70,7 +71,8 @@ function Data(A, atoms, Z, Ecut)
 
     # Figure out upper bound n_max on number of basis functions for any dimension
     # Want |B*(i j k)|^2 <= Ecut
-    n_max = ceil(Int, sqrt(Ecut) / opnorm(B))
+    n_max = 5 * ceil(Int, sqrt(Ecut) / opnorm(B))
+    print(n_max)
 
     # Running index of selected G vectors
     ig = 1
@@ -101,7 +103,7 @@ function kinetic(S::Data, k)
     for ig in 1:S.n_G, jg in 1:S.n_G
         # Kinetic energy
         if ig == jg
-            T[ig, jg] = sum(abs2, k) / 2 + sum(abs2, S.Gs[ig]) / 2 - dot(k, S.Gs[ig]) / 2
+            T[ig, jg] = sum(abs2, k + S.Gs[ig]) / 2
         end
     end
     T
@@ -182,17 +184,10 @@ end
 """
 Compute a structure correpsonding to a diamond-type fcc structure.
 """
-function compute_diamond_structure(L, Z, Ecut, kpoints)
-    a = 1.
-    A = L * Matrix(Diagonal(ones(3)))
-    τ = L / 8 .* @SVector[a, a, a]
-    atoms = [τ, -τ]
-    S = Data(A, atoms, Z, Ecut)
-
-    println("max G = $(maximum(maximum, S.G_coords))")
-
+function compute(S::Data, kpoints)
     λs = empty(kpoints, Vector{Float64})
     vs = empty(kpoints, Matrix{Float64})
+    τ = S.atoms[1]
     for k in kpoints
         Hk = potential(S, k, τ) + kinetic(S, k)
 
@@ -210,26 +205,51 @@ function compute_diamond_structure(L, Z, Ecut, kpoints)
     λs, vs
 end
 
-function main()
-    L = 1.0
-    Z = 14
-    Ecut = 1000
-    kdelta = 0.1
+function construct_diamond_structure(a, Z, Ecut)
+    A = a / 2 .* [[0 1 1.]
+                 [1 0 1.]
+                 [1 1 0.]]
+    τ = a / 8 .* @SVector[1, 1, 1]
+    atoms = [τ, -τ]
+    S = Data(A, atoms, Z, Ecut)
+    S
+end
 
+function main()
+    angströmToBohr = 1/0.52917721067
+    a = 5.43 * angströmToBohr
+    Z = 14
+    Ecut = 17
+    S = construct_diamond_structure(a, Z, Ecut)
+
+    println("max G = $(maximum(maximum, S.G_coords))")
+
+    println("A\n", S.A)
+    println("B\n", S.B)
+    println("A^T * B\n",transpose(S.A) * S.B)
+    println("")
+
+    kdelta = 0.05
     high_sym_points = [
         [0.5, 0.5, 0.5],    # L point
         [0.0, 0.0, 0.0],    # Γ point
-        [0.0, 0.0, 1.0],    # X point
-        #[0.5, 0.0, 1.0],    # W point
-        [0.75, 0.0, 0.75],  # K point
+        [1.0, 0.0, 0.0],    # X point
+        #[1.0, 0.5, 0.0],    # W point
+        [0.75, 0.75, 0.0],  # K point
         [0.0, 0.0, 0.0],    # Γ point
         #[0.5, 0.5, 0.5]     # L point
+        #[1.0,0.25,0.25]     # U point
     ]
     ks = []
     for i in 2:size(high_sym_points, 1)
-        linear(x) = high_sym_points[i - 1] +
-            x * (high_sym_points[i] - high_sym_points[i - 1])
-        ks = vcat(ks, map(x -> 2π * linear(x), 0:kdelta:1))
+        linear(x) = S.B * high_sym_points[i - 1] +
+            x * S.B * (high_sym_points[i] - high_sym_points[i - 1])
+        newks = map(x -> linear(x), 0:kdelta:1)
+        if length(ks) > 0 && newks[1] == ks[end]
+            ks = vcat(ks, newks[2:end])
+        else
+            ks = vcat(ks, newks)
+        end
     end
     println("Considered k points:")
     println(ks)
@@ -237,32 +257,80 @@ function main()
     # Other sampling:
     #   - Monkhorst-Pack mesh (H. J. Monkhorst and J. D. Pack, Phys. Rev. B 13, 5188 (1976). )
     #   - Chadi and Cohen
-    λs, vs = compute_diamond_structure(L, Z, Ecut, ks)
+    λs, vs = compute(S, ks)
 
+    # The band structure should be periodic with k
+    # (at least in infinite - basis size)
+    λtest1, _ = compute(S, [k .+ S.B[:, 1] for k in ks])
+    λtest2, _ = compute(S, [k .+ S.B[:, 2] for k in ks])
+    λtest3, _ = compute(S, [k .+ S.B[:, 3] for k in ks])
+
+    λdiff1 = (λs .- λtest1)
+    λdiff2 = (λs .- λtest2)
+    λdiff3 = (λs .- λtest3)
+    # figure()
+    # for i in 1:5
+    #     plot(HartreeToEv .* map(x -> x[i], λdiff1), label="λdiff1 $i")
+    #     plot(HartreeToEv .* map(x -> x[i], λdiff2), label="λdiff2 $i")
+    #     plot(HartreeToEv .* map(x -> x[i], λdiff3), label="λdiff3 $i")
+    # end
+    # legend()
+    # show()
+
+    HartreeToEv = 1 / 27.21138602
+    max1 = HartreeToEv .* [maximum(map(x -> abs(x[i]), λdiff1)) for i in 1:3]
+    max2 = HartreeToEv .* [maximum(map(x -> abs(x[i]), λdiff2)) for i in 1:3]
+    max3 = HartreeToEv .* [maximum(map(x -> abs(x[i]), λdiff3)) for i in 1:3]
+    print("max1 = $max1\n")
+    print("max2 = $max2\n")
+    print("max3 = $max3\n")
+    @assert maximum(max1) < 1e-4
+    @assert maximum(max2) < 1e-4
+    @assert maximum(max3) < 1e-4
+
+    #
+    # Plotting
+    #
     close()
 
-    # --
-    HartreeToEv = 1 / 27.21138602
-    a = 1.
-    A = L * Matrix(Diagonal(ones(3)))
-    τ = L / 8 .* @SVector[a, a, a]
-    atoms = [τ, -τ]
-    S = Data(A, atoms, Z, Ecut)
-    xs = map(x -> [x,x,x], 0:0.025:L)
+    # Plot lattice
+    figure()
+    origin = a/8 .* ones(3)
+    plot_lattice(S.A, S.atoms, radius=0.5*a, origin=origin .+ a.*[0.5,0.5,0.5])
+    plot_cube(origin + a.*[0.5,0.5,0.5], a, "r-")
+    PyPlot.plot3D(a.*[1/8, 9/8], a.*[1/8, 9/8], a.*[1/8,9/8], "b-")
+    xlabel("x")
+    ylabel("y")
+    zlabel("z")
+
+    # Plot Potential
+    xs = map(x -> [x,x,x] .+ origin, 0:0.0125:a)
     xabs = map(x -> x[3], xs)
+    τ = S.atoms[1]
     V = potential_real(S, τ, xs)
     figure()
     title("Potential along (x,x,x)")
     plot(xabs, HartreeToEv .* V)
     show()
-    # --
 
+    # Plot bands
     figure()
     for i in 1:10
-        plot(HartreeToEv .* map(x -> x[i], λs), label="Band $i")
+        plot(HartreeToEv .* map(x -> x[i], λs), "x-", label="Band $i")
     end
-    legend()
+    # legend()
+
+    high_sym_indices = [
+        i for (i,k) in enumerate(ks)
+        if any(norm(k .- S.B * sp) < 1e-14
+               for sp in high_sym_points)
+    ]
+    for idx in high_sym_indices
+        axvline(x=idx-1, color="grey",
+                linewidth=0.5)
+    end
     show()
+
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
