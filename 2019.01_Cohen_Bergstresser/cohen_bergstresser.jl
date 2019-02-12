@@ -229,22 +229,34 @@ function main()
     println("A^T * B\n",transpose(S.A) * S.B)
     println("")
 
-    kdelta = 0.05
+    kdelta = 0.02
     high_sym_points = [
         [0.5, 0.5, 0.5],    # L point
         [0.0, 0.0, 0.0],    # Γ point
         [1.0, 0.0, 0.0],    # X point
-        #[1.0, 0.5, 0.0],    # W point
+        [1.0, 0.5, 0.0],    # W point
+        [1.0, 0.25, 0.25],  # U point
         [0.75, 0.75, 0.0],  # K point
-        [0.0, 0.0, 0.0],    # Γ point
-        #[0.5, 0.5, 0.5]     # L point
-        #[1.0,0.25,0.25]     # U point
     ]
+    plot_path = [
+        # L -- Λ --> Γ
+        ([0.5, 0.5, 0.5], [0.0, 0.0, 0.0]),
+        # Γ -- Δ --> X
+        ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+        # X -- Σ --> U
+        ([1.0, 0.0, 0.0], [1.0, 0.25, 0.25]),
+        # K -- Σ --> Γ
+        ([0.75, 0.75, 0.0], [0.0, 0.0, 0.0]),
+    ]
+
     ks = []
-    for i in 2:size(high_sym_points, 1)
-        linear(x) = S.B * high_sym_points[i - 1] +
-            x * S.B * (high_sym_points[i] - high_sym_points[i - 1])
+    for (st, en) in plot_path
+        linear(x) = st + x * (en - st)
         newks = map(x -> linear(x), 0:kdelta:1)
+        #newks = [k for k in newks
+        #         if all(isinteger.(k ./ kdelta))]
+        #       Apparently the (2π/a .* ) is not (S.B *) as I originally thought ...
+        newks = [2π/a .* k for k in newks]
         if length(ks) > 0 && newks[1] == ks[end]
             ks = vcat(ks, newks[2:end])
         else
@@ -284,9 +296,9 @@ function main()
     print("max1 = $max1\n")
     print("max2 = $max2\n")
     print("max3 = $max3\n")
-    @assert maximum(max1) < 1e-4
-    @assert maximum(max2) < 1e-4
-    @assert maximum(max3) < 1e-4
+    @assert maximum(max1) < 1e-3
+    @assert maximum(max2) < 1e-3
+    @assert maximum(max3) < 1e-3
 
     #
     # Plotting
@@ -322,7 +334,8 @@ function main()
 
     high_sym_indices = [
         i for (i,k) in enumerate(ks)
-        if any(norm(k .- S.B * sp) < 1e-14
+        Apparently the (2π/a .* ) is not (S.B *) as I originally thought ...
+        if any(norm(k .- 2π/a .* sp) < 1e-14
                for sp in high_sym_points)
     ]
     for idx in high_sym_indices
