@@ -77,7 +77,6 @@ function Data(A, atoms, Z, Ecut)
     # Figure out upper bound n_max on number of basis functions for any dimension
     # Want |B*(i j k)|^2 <= Ecut
     n_max = ceil(Int, sqrt(Ecut) / opnorm(B))
-    print(n_max)
 
     # Running index of selected G vectors
     ig = 1
@@ -134,6 +133,14 @@ function potential(S::Data, τ)
         Gcsq = sum(abs2, Gci .- Gcj)
         ΔG = S.Gs[ig] - S.Gs[jg]
 
+        # TODO Dirty hack ... the Fourier terms
+        #      are kind of indexed in G like this
+        #      ... I still need to understand that
+        a = 5.431020504 * angströmToBohr
+        vec = ΔG / (2π / a)
+        #println(Gcsq, "   ", Int(sum(abs2, vec)))
+        Gcsq = Int(sum(abs2, vec))
+
         # Symmetric and antisymmetric structure factor
         S_sym = cos(dot(τ, ΔG))
         S_asym = sin(dot(τ, ΔG))
@@ -171,12 +178,12 @@ end
 """
 Compute a structure correpsonding to a diamond-type fcc structure.
 """
-function compute(S::Data, kpoints, fac)
+function compute(S::Data, kpoints)
     λs = empty(kpoints, Vector{Float64})
     vs = empty(kpoints, Matrix{Float64})
     τ = S.atoms[1]
     for k in kpoints
-        Hk = kinetic(S, k) + fac * potential(S, k, τ)
+        Hk = kinetic(S, k) + potential(S, τ)
         @assert maximum(imag(Hk)) < 1e-12
         Hk = real(Hk)
         @assert maximum(transpose(Hk) - Hk) < 1e-12
@@ -225,25 +232,25 @@ function plot_lattice(S::Data, a)
     zlabel("z")
 end
 
-function assert_periodicity(S::Data, ks, λs, fac)
+function assert_periodicity(S::Data, ks, λs)
     # The band structure should be periodic with k
     # (at least in infinite - basis size)
-    λtest1, _ = compute(S, [k .+ S.B[:, 1] for k in ks], fac)
-    λtest2, _ = compute(S, [k .+ S.B[:, 2] for k in ks], fac)
-    λtest3, _ = compute(S, [k .+ S.B[:, 3] for k in ks], fac)
+    λtest1, _ = compute(S, [k .+ S.B[:, 1] for k in ks])
+    λtest2, _ = compute(S, [k .+ S.B[:, 2] for k in ks])
+    λtest3, _ = compute(S, [k .+ S.B[:, 3] for k in ks])
     λdiff1 = (λs .- λtest1)
     λdiff2 = (λs .- λtest2)
     λdiff3 = (λs .- λtest3)
 
-    max1 = HartreeToEv .* [maximum(map(x -> abs(x[i]), λdiff1)) for i in 1:3]
-    max2 = HartreeToEv .* [maximum(map(x -> abs(x[i]), λdiff2)) for i in 1:3]
-    max3 = HartreeToEv .* [maximum(map(x -> abs(x[i]), λdiff3)) for i in 1:3]
+    max1 = [maximum(map(x -> abs(x[i]), λdiff1)) for i in 1:3]
+    max2 = [maximum(map(x -> abs(x[i]), λdiff2)) for i in 1:3]
+    max3 = [maximum(map(x -> abs(x[i]), λdiff3)) for i in 1:3]
     print("max1 = $max1\n")
     print("max2 = $max2\n")
     print("max3 = $max3\n")
-    @assert maximum(max1) < 1e-3
-    @assert maximum(max2) < 1e-3
-    @assert maximum(max3) < 1e-3
+    @assert maximum(max1) < 0.01
+    @assert maximum(max2) < 0.01
+    @assert maximum(max3) < 0.01
 end
 
 
@@ -292,7 +299,7 @@ end
 function main()
     a = 5.431020504 * angströmToBohr
     Z = 14
-    Ecut = 20 * (2π / a)^2
+    Ecut = 28 * (2π / a)^2
     S = construct_diamond_structure(a, Z, Ecut)
 
     println("max G = $(maximum(maximum, S.G_coords))")
@@ -341,18 +348,13 @@ function main()
     # Plotting
     #
     close()
-    for fac in [1] #, 1, 2, 3, 4, 5]
-        λs, vs = compute(S, ks, fac)
-        plot_bands(S, accu_length, ks, λs, high_sym)
-        title("fac = $fac")
-    end
 
-    # fac = 1.0
-    # assert_periodicity(S, ks, λs, fac)
+    plot_potential(S, a)
+    plot_lattice(S, a)
 
-    # plot_potential(S, a)
-    # plot_lattice(S, a)
-    # plot_bands(S, accu_length, ks, λs, high_sym)
+    λs, vs = compute(S, ks)
+    # assert_periodicity(S, ks, λs)
+    plot_bands(S, accu_length, ks, λs, high_sym)
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
