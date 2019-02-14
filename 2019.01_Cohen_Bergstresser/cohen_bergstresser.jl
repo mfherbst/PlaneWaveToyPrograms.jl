@@ -5,6 +5,11 @@ using LinearAlgebra
 using PyPlot
 include("visualise.jl")
 
+# Unit conversion
+angströmToBohr = 1/0.52917721067
+RyToHartree = 1/2
+HartreeToEv = 1 / 27.21138602
+
 
 """
 We solve the Cohen-Bergstresser model, i.e. we compute the lower part of the
@@ -71,7 +76,7 @@ function Data(A, atoms, Z, Ecut)
 
     # Figure out upper bound n_max on number of basis functions for any dimension
     # Want |B*(i j k)|^2 <= Ecut
-    n_max = 5 * ceil(Int, sqrt(Ecut) / opnorm(B))
+    n_max = ceil(Int, sqrt(Ecut) / opnorm(B))
     print(n_max)
 
     # Running index of selected G vectors
@@ -111,7 +116,6 @@ end
 
 
 function potential(S::Data, k, τ)
-    RyToHartree = 1/2
 
     # Set Fourier terms for potential
     V_sym = Dict{Int64,Float64}()
@@ -146,34 +150,18 @@ function potential_real(S::Data, τ, xs)
     """
     Evaluate potential on a set of real points
     """
+    Vf = potential(S, 0, τ)
 
-    RyToHartree = 1/2
-
-    # Set Fourier terms for potential
-    V_sym = Dict{Int64,Float64}()
-    V_asym = Dict{Int64,Float64}()
-    if S.Z == 14  # Si
-        V_sym[3]  = -0.21 * RyToHartree
-        V_sym[8]  = 0.04 * RyToHartree
-        V_sym[11] = 0.08 * RyToHartree
-    else
-        throw(ErrorException("Z == $(S.Z) not implemented"))
-    end
+    idx_DC = [i for (i, Gc) in enumerate(S.G_coords)
+              if norm(Gc) == 0]
+    @assert length(idx_DC) == 1
+    idx_DC = idx_DC[1]
 
     V = zeros(ComplexF64, size(xs))
     for ig in 1:S.n_G
         for (ix, x) in enumerate(xs)
             G = S.Gs[ig]
-            Gc = S.G_coords[ig]
-            Gcsq = sum(abs2, Gc)
-
-            # Symmetric and antisymmetric structure factor
-            S_sym = cos(dot(τ, G))
-            S_asym = sin(dot(τ, G))
-
-            # FT factor
-            V[ix] += (S_sym * get(V_sym, Gcsq, 0)
-                      + im * S_asym * get(V_asym, Gcsq, 0)) * exp(-im * dot(G, x))
+            V[ix] += Vf[ig, idx_DC] * exp(-im * dot(G, x)) / sqrt(S.unit_cell_volume)
         end
     end
     @assert maximum(imag(V)) < 1e-12
@@ -184,13 +172,12 @@ end
 """
 Compute a structure correpsonding to a diamond-type fcc structure.
 """
-function compute(S::Data, kpoints)
+function compute(S::Data, kpoints, fac)
     λs = empty(kpoints, Vector{Float64})
     vs = empty(kpoints, Matrix{Float64})
     τ = S.atoms[1]
     for k in kpoints
-        Hk = potential(S, k, τ) + kinetic(S, k)
-
+        Hk = kinetic(S, k) + fac * potential(S, k, τ)
         @assert maximum(imag(Hk)) < 1e-12
         Hk = real(Hk)
         @assert maximum(transpose(Hk) - Hk) < 1e-12
@@ -215,96 +202,19 @@ function construct_diamond_structure(a, Z, Ecut)
     S
 end
 
-function main()
-    angströmToBohr = 1/0.52917721067
-    a = 5.43 * angströmToBohr
-    Z = 14
-    Ecut = 17
-    S = construct_diamond_structure(a, Z, Ecut)
+function plot_potential(S::Data, a)
+    # Plot Potential
+    origin = a/8 .* ones(3)
+    xs = map(x -> [x,x,x] .+ origin, 0:0.0125:a)
+    xabs = map(x -> x[3], xs)
+    τ = S.atoms[1]
+    V = potential_real(S, τ, xs)
+    figure()
+    title("Potential along (x,x,x)")
+    plot(xabs, HartreeToEv .* V)
+end
 
-    println("max G = $(maximum(maximum, S.G_coords))")
-
-    println("A\n", S.A)
-    println("B\n", S.B)
-    println("A^T * B\n",transpose(S.A) * S.B)
-    println("")
-
-    kdelta = 0.02
-    high_sym_points = [
-        [0.5, 0.5, 0.5],    # L point
-        [0.0, 0.0, 0.0],    # Γ point
-        [1.0, 0.0, 0.0],    # X point
-        [1.0, 0.5, 0.0],    # W point
-        [1.0, 0.25, 0.25],  # U point
-        [0.75, 0.75, 0.0],  # K point
-    ]
-    plot_path = [
-        # L -- Λ --> Γ
-        ([0.5, 0.5, 0.5], [0.0, 0.0, 0.0]),
-        # Γ -- Δ --> X
-        ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
-        # X -- Σ --> U
-        ([1.0, 0.0, 0.0], [1.0, 0.25, 0.25]),
-        # K -- Σ --> Γ
-        ([0.75, 0.75, 0.0], [0.0, 0.0, 0.0]),
-    ]
-
-    ks = []
-    for (st, en) in plot_path
-        linear(x) = st + x * (en - st)
-        newks = map(x -> linear(x), 0:kdelta:1)
-        #newks = [k for k in newks
-        #         if all(isinteger.(k ./ kdelta))]
-        #       Apparently the (2π/a .* ) is not (S.B *) as I originally thought ...
-        newks = [2π/a .* k for k in newks]
-        if length(ks) > 0 && newks[1] == ks[end]
-            ks = vcat(ks, newks[2:end])
-        else
-            ks = vcat(ks, newks)
-        end
-    end
-    println("Considered k points:")
-    println(ks)
-    println("-- -- -- -- -- -- --")
-    # Other sampling:
-    #   - Monkhorst-Pack mesh (H. J. Monkhorst and J. D. Pack, Phys. Rev. B 13, 5188 (1976). )
-    #   - Chadi and Cohen
-    λs, vs = compute(S, ks)
-
-    # The band structure should be periodic with k
-    # (at least in infinite - basis size)
-    λtest1, _ = compute(S, [k .+ S.B[:, 1] for k in ks])
-    λtest2, _ = compute(S, [k .+ S.B[:, 2] for k in ks])
-    λtest3, _ = compute(S, [k .+ S.B[:, 3] for k in ks])
-
-    λdiff1 = (λs .- λtest1)
-    λdiff2 = (λs .- λtest2)
-    λdiff3 = (λs .- λtest3)
-    # figure()
-    # for i in 1:5
-    #     plot(HartreeToEv .* map(x -> x[i], λdiff1), label="λdiff1 $i")
-    #     plot(HartreeToEv .* map(x -> x[i], λdiff2), label="λdiff2 $i")
-    #     plot(HartreeToEv .* map(x -> x[i], λdiff3), label="λdiff3 $i")
-    # end
-    # legend()
-    # show()
-
-    HartreeToEv = 1 / 27.21138602
-    max1 = HartreeToEv .* [maximum(map(x -> abs(x[i]), λdiff1)) for i in 1:3]
-    max2 = HartreeToEv .* [maximum(map(x -> abs(x[i]), λdiff2)) for i in 1:3]
-    max3 = HartreeToEv .* [maximum(map(x -> abs(x[i]), λdiff3)) for i in 1:3]
-    print("max1 = $max1\n")
-    print("max2 = $max2\n")
-    print("max3 = $max3\n")
-    @assert maximum(max1) < 1e-3
-    @assert maximum(max2) < 1e-3
-    @assert maximum(max3) < 1e-3
-
-    #
-    # Plotting
-    #
-    close()
-
+function plot_lattice(S::Data, a)
     # Plot lattice
     figure()
     origin = a/8 .* ones(3)
@@ -314,36 +224,128 @@ function main()
     xlabel("x")
     ylabel("y")
     zlabel("z")
+end
 
-    # Plot Potential
-    xs = map(x -> [x,x,x] .+ origin, 0:0.0125:a)
-    xabs = map(x -> x[3], xs)
-    τ = S.atoms[1]
-    V = potential_real(S, τ, xs)
-    figure()
-    title("Potential along (x,x,x)")
-    plot(xabs, HartreeToEv .* V)
-    show()
+function assert_periodicity(S::Data, ks, λs, fac)
+    # The band structure should be periodic with k
+    # (at least in infinite - basis size)
+    λtest1, _ = compute(S, [k .+ S.B[:, 1] for k in ks], fac)
+    λtest2, _ = compute(S, [k .+ S.B[:, 2] for k in ks], fac)
+    λtest3, _ = compute(S, [k .+ S.B[:, 3] for k in ks], fac)
+    λdiff1 = (λs .- λtest1)
+    λdiff2 = (λs .- λtest2)
+    λdiff3 = (λs .- λtest3)
 
-    # Plot bands
+    max1 = HartreeToEv .* [maximum(map(x -> abs(x[i]), λdiff1)) for i in 1:3]
+    max2 = HartreeToEv .* [maximum(map(x -> abs(x[i]), λdiff2)) for i in 1:3]
+    max3 = HartreeToEv .* [maximum(map(x -> abs(x[i]), λdiff3)) for i in 1:3]
+    print("max1 = $max1\n")
+    print("max2 = $max2\n")
+    print("max3 = $max3\n")
+    @assert maximum(max1) < 1e-3
+    @assert maximum(max2) < 1e-3
+    @assert maximum(max3) < 1e-3
+end
+
+
+function plot_bands(S::Data, accu_length, ks, λs, high_sym_points)
     figure()
-    for i in 1:10
-        plot(HartreeToEv .* map(x -> x[i], λs), "x-", label="Band $i")
+    for i in 1:20
+        plot(accu_length, HartreeToEv .* map(x -> x[i], λs),
+             "-", label="Band $i")
     end
     # legend()
 
     high_sym_indices = [
         i for (i,k) in enumerate(ks)
-        Apparently the (2π/a .* ) is not (S.B *) as I originally thought ...
-        if any(norm(k .- 2π/a .* sp) < 1e-14
-               for sp in high_sym_points)
+        if any(norm(k .- sp) < 1e-14
+               for sp in values(high_sym_points))
     ]
     for idx in high_sym_indices
-        axvline(x=idx-1, color="grey",
+        axvline(x=accu_length[idx], color="grey",
                 linewidth=0.5)
     end
     show()
+end
 
+function construct_kpoints(plot_path, kdelta)
+    ks = []
+    accu_k_length = Vector([0.])
+    for (st, en) in plot_path
+        Npoints = ceil(norm(en - st) / kdelta)
+        kdiff = (en - st) / Npoints
+        newks = [st .+ fac .* kdiff for fac in 0:Npoints-1]
+        append!(ks, newks)
+        append!(accu_k_length, accumulate(+, norm.(diff(newks)); init=accu_k_length[end]))
+        push!(accu_k_length, accu_k_length[end] + norm(kdiff))
+    end
+    @assert length(ks) + 1 == length(accu_k_length)
+    ks, accu_k_length[1:end-1]
+end
+
+function main()
+    a = 5.43 * angströmToBohr
+    a = 1 #5.43 * angströmToBohr
+    Z = 14
+    Ecut = 20 * (2π / a)^2
+    S = construct_diamond_structure(a, Z, Ecut)
+
+    println("max G = $(maximum(maximum, S.G_coords))")
+
+    println("A (units of a)\n", S.A)
+    println("B (units of 2π/a)\n", S.B ./ (2π / a))
+    println("unit cell volume: $(S.unit_cell_volume)")
+    println("")
+
+
+    # Usual sampling methods
+    #   - Monkhorst-Pack mesh
+    #   - Chadi and Cohen
+    kdelta = 0.2
+    high_sym = Dict(
+        # Apparently the (2π/a .* ) is not (S.B *)
+        # as I originally thought ...
+        :Γ => 2π/a .* [  0,   0,   0],
+        :X => 2π/a .* [  0,   1,   0],
+        :W => 2π/a .* [1/2,   1,   0],
+        :K => 2π/a .* [3/4, 3/4,   0],
+        :L => 2π/a .* [1/2, 1/2, 1/2],
+        :U => 2π/a .* [1/4,   1, 1/4],
+    )
+    plot_path = [
+        # L -- Λ --> Γ
+        (high_sym[:L], high_sym[:Γ]),
+        # Γ -- Δ --> X
+        (high_sym[:Γ], high_sym[:X]),
+        # X -- Σ --> U
+        (high_sym[:X], high_sym[:U]),
+        # K -- Σ --> Γ
+        (high_sym[:K], high_sym[:Γ]),
+    ]
+    ks, accu_length = construct_kpoints(plot_path, kdelta)
+
+    close()
+    for fac in [0, 10, 100, 1000] #200, 250, 300, 350]
+        λs, vs = compute(S, ks, fac)
+        plot_bands(S, accu_length, ks, λs, high_sym)
+        title("fac = $fac")
+    end
+
+    plot_potential(S, a)
+
+    return
+
+    fac = 1.0
+    λs, vs = compute(S, ks, fac)
+    # assert_periodicity(S, ks, λs, fac)
+
+    #
+    # Plotting
+    #
+    close()
+    # plot_potential(S, a)
+    # plot_lattice(S, a)
+    plot_bands(S, accu_length, ks, λs, high_sym)
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
