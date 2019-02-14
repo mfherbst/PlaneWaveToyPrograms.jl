@@ -6,9 +6,9 @@ using PyPlot
 include("visualise.jl")
 
 # Unit conversion
-angströmToBohr = 1/0.52917721067
-RyToHartree = 1/2
-HartreeToEv = 1 / 27.21138602
+angströmToBohr = 1 / 0.52917721067
+RyToHartree = 1 / 2
+HartreeToEv = 27.21138602
 
 
 """
@@ -115,8 +115,7 @@ function kinetic(S::Data, k)
 end
 
 
-function potential(S::Data, k, τ)
-
+function potential(S::Data, τ)
     # Set Fourier terms for potential
     V_sym = Dict{Int64,Float64}()
     V_asym = Dict{Int64,Float64}()
@@ -150,7 +149,7 @@ function potential_real(S::Data, τ, xs)
     """
     Evaluate potential on a set of real points
     """
-    Vf = potential(S, 0, τ)
+    Vf = potential(S, τ)
 
     idx_DC = [i for (i, Gc) in enumerate(S.G_coords)
               if norm(Gc) == 0]
@@ -194,8 +193,8 @@ end
 
 function construct_diamond_structure(a, Z, Ecut)
     A = a / 2 .* [[0 1 1.]
-                 [1 0 1.]
-                 [1 1 0.]]
+                  [1 0 1.]
+                  [1 1 0.]]
     τ = a / 8 .* @SVector[1, 1, 1]
     atoms = [τ, -τ]
     S = Data(A, atoms, Z, Ecut)
@@ -266,6 +265,11 @@ function plot_bands(S::Data, accu_length, ks, λs, high_sym_points)
                 linewidth=0.5)
     end
     show()
+
+    get_label(i) = first(string(lal) for (lal, val) in high_sym_points
+                         if norm(val .- ks[i]) < 1e-14)
+    xticks([accu_length[idx] for idx in high_sym_indices],
+           [get_label(idx) for idx in high_sym_indices])
 end
 
 function construct_kpoints(plot_path, kdelta)
@@ -279,20 +283,21 @@ function construct_kpoints(plot_path, kdelta)
         append!(accu_k_length, accumulate(+, norm.(diff(newks)); init=accu_k_length[end]))
         push!(accu_k_length, accu_k_length[end] + norm(kdiff))
     end
-    @assert length(ks) + 1 == length(accu_k_length)
-    ks, accu_k_length[1:end-1]
+    push!(ks, plot_path[end][end])
+    @assert length(ks) == length(accu_k_length)
+    ks, accu_k_length
 end
 
+
 function main()
-    a = 5.43 * angströmToBohr
-    a = 1 #5.43 * angströmToBohr
+    a = 5.431020504 * angströmToBohr
     Z = 14
     Ecut = 20 * (2π / a)^2
     S = construct_diamond_structure(a, Z, Ecut)
 
     println("max G = $(maximum(maximum, S.G_coords))")
 
-    println("A (units of a)\n", S.A)
+    println("A (units of a)\n", S.A ./ a)
     println("B (units of 2π/a)\n", S.B ./ (2π / a))
     println("unit cell volume: $(S.unit_cell_volume)")
     println("")
@@ -301,7 +306,7 @@ function main()
     # Usual sampling methods
     #   - Monkhorst-Pack mesh
     #   - Chadi and Cohen
-    kdelta = 0.2
+    kdelta = 0.02 * (2π / a)
     high_sym = Dict(
         # Apparently the (2π/a .* ) is not (S.B *)
         # as I originally thought ...
@@ -322,30 +327,32 @@ function main()
         # K -- Σ --> Γ
         (high_sym[:K], high_sym[:Γ]),
     ]
+    plot_path = [
+        (high_sym[:L], high_sym[:Γ]),
+        (high_sym[:Γ], high_sym[:X]),
+        (high_sym[:X], high_sym[:W]),
+        (high_sym[:W], high_sym[:Γ]),
+        (high_sym[:Γ], high_sym[:U]),
+        (high_sym[:U], high_sym[:X]),
+    ]
     ks, accu_length = construct_kpoints(plot_path, kdelta)
-
-    close()
-    for fac in [0, 10, 100, 1000] #200, 250, 300, 350]
-        λs, vs = compute(S, ks, fac)
-        plot_bands(S, accu_length, ks, λs, high_sym)
-        title("fac = $fac")
-    end
-
-    plot_potential(S, a)
-
-    return
-
-    fac = 1.0
-    λs, vs = compute(S, ks, fac)
-    # assert_periodicity(S, ks, λs, fac)
 
     #
     # Plotting
     #
     close()
+    for fac in [1] #, 1, 2, 3, 4, 5]
+        λs, vs = compute(S, ks, fac)
+        plot_bands(S, accu_length, ks, λs, high_sym)
+        title("fac = $fac")
+    end
+
+    # fac = 1.0
+    # assert_periodicity(S, ks, λs, fac)
+
     # plot_potential(S, a)
     # plot_lattice(S, a)
-    plot_bands(S, accu_length, ks, λs, high_sym)
+    # plot_bands(S, accu_length, ks, λs, high_sym)
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
