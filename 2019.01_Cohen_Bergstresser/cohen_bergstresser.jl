@@ -31,6 +31,9 @@ We solve the complete problem in Fourier space.
 Static data of the calculation
 """
 struct Data
+    """Lattice constant"""
+    a::Float64
+
     """3x3 lattice vectors, in columns. |Γ| = det(A)"""
     A::Matrix{Float64}
 
@@ -63,11 +66,12 @@ end
 """
 Constructor for the data structure
 
+a      Principle lattice constant
 A      Lattice vectors as columns
 atoms  Atom positions
 Zs     Atom changes
 """
-function Data(A, atoms, Z, Ecut)
+function Data(a, A, atoms, Z, Ecut)
     B = 2π * inv(Array(A'))
     unit_cell_volume = det(A)
 
@@ -97,7 +101,7 @@ function Data(A, atoms, Z, Ecut)
     Gs = [B*G_ind for G_ind in G_coords]
     n_G = length(Gs)
 
-    Data(A, atoms, Z, Ecut, B,
+    Data(a, A, atoms, Z, Ecut, B,
          unit_cell_volume, Gs, n_G, G_coords)
 end
 
@@ -116,38 +120,40 @@ end
 
 function potential(S::Data, τ)
     # Set Fourier terms for potential
+    # The terms are indexed in |G|^2 if units of (2π/a)^2
+    # are employed
     V_sym = Dict{Int64,Float64}()
     V_asym = Dict{Int64,Float64}()
     if S.Z == 14  # Si
         V_sym[3]  = -0.21 * RyToHartree
         V_sym[8]  = 0.04 * RyToHartree
         V_sym[11] = 0.08 * RyToHartree
+    elseif S.Z == 32  # Ge
+        V_sym[3]  = -0.23 * RyToHartree
+        V_sym[8]  = 0.01 * RyToHartree
+        V_sym[11] = 0.06 * RyToHartree
+    elseif S.Z == 50  # Sn
+        V_sym[3]  = -0.20 * RyToHartree
+        V_sym[8]  = 0.00 * RyToHartree
+        V_sym[11] = 0.04 * RyToHartree
     else
         throw(ErrorException("Z == $(S.Z) not implemented"))
     end
 
     V = zeros(ComplexF64, S.n_G, S.n_G)
     for ig in 1:S.n_G, jg in 1:S.n_G
-        Gcj = S.G_coords[jg]
-        Gci = S.G_coords[ig]
-        Gcsq = sum(abs2, Gci .- Gcj)
-        ΔG = S.Gs[ig] - S.Gs[jg]
+        ΔG = S.Gs[ig] - S.Gs[jg]  # in atomic units
 
-        # TODO Dirty hack ... the Fourier terms
-        #      are kind of indexed in G like this
-        #      ... I still need to understand that
-        a = 5.431020504 * angströmToBohr
-        vec = ΔG / (2π / a)
-        #println(Gcsq, "   ", Int(sum(abs2, vec)))
-        Gcsq = Int(sum(abs2, vec))
+        # Get |G|^2 in units of (2π/a)^2
+        ΔGsq_pi = Int(round(sum(abs2, ΔG / (2π / S.a)), digits=12))
 
         # Symmetric and antisymmetric structure factor
         S_sym = cos(dot(τ, ΔG))
         S_asym = sin(dot(τ, ΔG))
 
         # Construct potential
-        V[ig, jg] += S_sym * get(V_sym, Gcsq, 0)
-        V[ig, jg] -= im * S_asym * get(V_asym, Gcsq, 0)
+        V[ig, jg] += S_sym * get(V_sym, ΔGsq_pi, 0)
+        V[ig, jg] -= im * S_asym * get(V_asym, ΔGsq_pi, 0)
     end
     V
 end
@@ -178,7 +184,7 @@ end
 """
 Compute a structure correpsonding to a diamond-type fcc structure.
 """
-function compute(S::Data, kpoints)
+function compute(S::Data, kpoints; shift=0)
     λs = empty(kpoints, Vector{Float64})
     vs = empty(kpoints, Matrix{Float64})
     τ = S.atoms[1]
@@ -187,6 +193,7 @@ function compute(S::Data, kpoints)
         @assert maximum(imag(Hk)) < 1e-12
         Hk = real(Hk)
         @assert maximum(transpose(Hk) - Hk) < 1e-12
+        Hk = Hk - shift * I
         Hk = Symmetric(Hk)
 
         # Diagonalise
@@ -198,20 +205,34 @@ function compute(S::Data, kpoints)
     λs, vs
 end
 
+function obtain_shift(S::Data)
+    # Shift the potential such that the
+    # nth band at the kpoint k is exactly
+    # at the energy zero.
+    nth = 3
+    k = [0,0,0]
+
+    τ = S.atoms[1]
+    Hk = kinetic(S, k) + potential(S, τ)
+    Hk = Symmetric(real(Hk))
+    λ = eigvals(Hk)
+    return λ[nth]
+end
+
 function construct_diamond_structure(a, Z, Ecut)
     A = a / 2 .* [[0 1 1.]
                   [1 0 1.]
                   [1 1 0.]]
     τ = a / 8 .* @SVector[1, 1, 1]
     atoms = [τ, -τ]
-    S = Data(A, atoms, Z, Ecut)
+    S = Data(a, A, atoms, Z, Ecut)
     S
 end
 
-function plot_potential(S::Data, a)
+function plot_potential(S::Data)
     # Plot Potential
-    origin = a/8 .* ones(3)
-    xs = map(x -> [x,x,x] .+ origin, 0:0.0125:a)
+    origin = S.a / 8 .* ones(3)
+    xs = map(x -> [x,x,x] .+ origin, 0:0.0125:S.a)
     xabs = map(x -> x[3], xs)
     τ = S.atoms[1]
     V = potential_real(S, τ, xs)
@@ -220,11 +241,12 @@ function plot_potential(S::Data, a)
     plot(xabs, HartreeToEv .* V)
 end
 
-function plot_lattice(S::Data, a)
+function plot_lattice(S::Data)
     # Plot lattice
     figure()
-    origin = a/8 .* ones(3)
-    plot_lattice(S.A, S.atoms, radius=0.5*a, origin=origin .+ a.*[0.5,0.5,0.5])
+    a = S.a
+    origin = S.a/8 .* ones(3)
+    plot_lattice(S.A, S.atoms, radius=0.5*S.a, origin=origin .+ a.*[0.5,0.5,0.5])
     plot_cube(origin + a.*[0.5,0.5,0.5], a, "r-")
     PyPlot.plot3D(a.*[1/8, 9/8], a.*[1/8, 9/8], a.*[1/8,9/8], "b-")
     xlabel("x")
@@ -256,7 +278,7 @@ end
 
 function plot_bands(S::Data, accu_length, ks, λs, high_sym_points)
     figure()
-    for i in 1:20
+    for i in 1:10
         plot(accu_length, HartreeToEv .* map(x -> x[i], λs),
              "-", label="Band $i")
     end
@@ -297,10 +319,20 @@ end
 
 
 function main()
-    a = 5.431020504 * angströmToBohr
-    Z = 14
-    Ecut = 28 * (2π / a)^2
-    S = construct_diamond_structure(a, Z, Ecut)
+    Z = 14  # Si
+    # Z = 32  # Ge
+    # Z = 50  # Sn
+    Ecut_pi = 28 # in units of (2π / a)^2
+    a = 1
+
+    if Z == 14  # Si
+        a = 5.431020504 * angströmToBohr
+    elseif Z == 32 # Ge
+        a = 5.658 * angströmToBohr
+    elseif Z == 50 # Sn
+        a = 6.48920 * angströmToBohr
+    end
+    S = construct_diamond_structure(a, Z, Ecut_pi * (2π / a)^2)
 
     println("max G = $(maximum(maximum, S.G_coords))")
 
@@ -334,14 +366,14 @@ function main()
         # K -- Σ --> Γ
         (high_sym[:K], high_sym[:Γ]),
     ]
-    plot_path = [
-        (high_sym[:L], high_sym[:Γ]),
-        (high_sym[:Γ], high_sym[:X]),
-        (high_sym[:X], high_sym[:W]),
-        (high_sym[:W], high_sym[:Γ]),
-        (high_sym[:Γ], high_sym[:U]),
-        (high_sym[:U], high_sym[:X]),
-    ]
+    # plot_path = [
+    #     (high_sym[:L], high_sym[:Γ]),
+    #     (high_sym[:Γ], high_sym[:X]),
+    #     (high_sym[:X], high_sym[:W]),
+    #     (high_sym[:W], high_sym[:Γ]),
+    #     (high_sym[:Γ], high_sym[:U]),
+    #     (high_sym[:U], high_sym[:X]),
+    # ]
     ks, accu_length = construct_kpoints(plot_path, kdelta)
 
     #
@@ -349,12 +381,27 @@ function main()
     #
     close()
 
-    plot_potential(S, a)
-    plot_lattice(S, a)
+    plot_potential(S)
+    plot_lattice(S)
 
-    λs, vs = compute(S, ks)
+    shift = obtain_shift(S)
+    println("Employing shift $shift")
+    λs, vs = compute(S, ks, shift=shift)
     # assert_periodicity(S, ks, λs)
     plot_bands(S, accu_length, ks, λs, high_sym)
+
+    if Z == 14  # Si
+        ylim(-5, 6)
+        title("Si")
+    elseif Z == 32  # Ge
+        ylim(-5, 7)
+        title("Ge")
+    elseif Z == 50  # Sn
+        ylim(-4, 6)
+        title("Sn")
+    end
+
+    Nothing
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
