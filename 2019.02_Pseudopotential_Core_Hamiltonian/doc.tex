@@ -7,7 +7,7 @@
 \begin{document}
 \title{Expressions for implementing Goedecker, Teter, Hutter,
 Hartwigsen pseudopotentials}
-\author{mfh}
+\author{Michael F. Herbst}
 \maketitle
 
 These derivations follow the papers \citet{Goedecker1996}
@@ -28,8 +28,7 @@ and \citet{Hartwigsen1998}.
 		\[ \Op{T}_{\vec{R}} u(\vec{x}) = u(\vec{x} - \vec{R}) \]
 \end{description}
 
-\section{General considerations}
-\subsection{Local part}
+\section{Local part}
 First we want to compute the matrix elements of the local part
 of the pseudopotential.
 Given $V_\text{loc}(r)$ as in (1) of \citet{Goedecker1996},
@@ -90,8 +89,8 @@ sinc-function, we get further
 	\label{eqn:Local}
 \end{equation}
 
-\subsection{Nonlocal part}
-First we discuss the properties of the non-local part.
+\section{Nonlocal part}
+Next we discuss the properties of the non-local part.
 It is effectively composed of projections $\ketbra{p}{p)}$
 with $p$ being a projection vector, centred at the atoms.
 
@@ -319,14 +318,6 @@ Their Fourier transform is
 \end{align*}
 so again a radial part depending only on $\norm{\vec{q}}$
 times a spherical harmonic of $\uvec{q}$.
-
-
-\section[
-Confirming the GTH and HGH expressions
-]{Confirming the GTH and HGH expressions \cite{Goedecker1996,Hartwigsen1998}}
-
-
-
 
 \bibliographystyle{mfh}
 \bibliography{literatur}
