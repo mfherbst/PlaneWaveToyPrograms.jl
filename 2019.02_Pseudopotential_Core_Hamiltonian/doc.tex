@@ -56,12 +56,39 @@ We compute for each $\vec{k}$:
 	&= \frac1{\Omega} \int_{\R^3} \exp\big(-\I \vec{K} \cdot\vec{x}\big)
 	V_\text{loc}(\norm{\vec{x}}) \exp\big(\I \vec{K}' \cdot \vec{x}\big) \D\vec{x} \\
 	&= \frac1{\Omega} \int_{\R^3} \exp\big(\I (\vec{K}'-\vec{K}) \cdot\vec{x}\big)
-	V_\text{loc}(\norm{\vec{x}}) \D\vec{x}\\
-	&= \frac1{\Omega} \hat{V}_\text{loc}(\norm{\vec{K}'-\vec{K}})
+	V_\text{loc}(\norm{\vec{x}}) \D\vec{x}
 \end{align*}
-\todoil{Can we reiterate on the last equals}
 keeping in mind that
-\[ \exp\big(\I \vec{K} \cdot \left(\vec{r} + \vec{R}\right)\big) = \exp(\I \vec{K} \cdot \vec{r}) \]
+\[ \exp\big(\I \vec{K} \cdot \left(\vec{r} + \vec{R}\right)\big) = \exp(\I \vec{K} \cdot \vec{r}). \]
+Using the plane wave expansion in spherical harmonics
+\[
+	e^{\I \vec{k} \cdot \vec{r}} =
+	4 \pi \sum_{l = 0}^\infty \sum_{m = -l}^l
+	\I^l j_l(k r) Y_l^m(\uvec{k}) Y_l^{m\ast}(\uvec{r})
+\]
+and the fact that
+\[
+	Y_l^m(\uvec{k}) \int_{\mathbb{S}^2} Y_l^{m\ast}(\uvec{r}) \D \uvec{r}
+		= \delta_{l,0} \delta_{m,0}
+\]
+allow to rewrite this as
+\[
+	\braket{e_{\vec{K}}}{V_\text{loc}^\text{tot} e_{\vec{K}'}}_\Omega
+	= \frac{4\pi}{\Omega} \int_{\R^+}
+	x^2\,  j_0\left(x \norm{\vec{K}'-\vec{K}}\right)
+	V_\text{loc}(x) \D x
+\]
+which is a spherical Hankel transform.
+Since $j_0$ is just a (unnormalised)
+sinc-function, we get further
+\begin{equation}
+	\braket{e_{\vec{K}}}{V_\text{loc}^\text{tot} e_{\vec{K}'}}_\Omega
+	= \frac{4\pi}{\Omega} \int_{\R^+}
+	\frac{x\, \sin\left(x\norm{\vec{K}'-\vec{K}}\right)}
+	{\norm{\vec{K}'-\vec{K}}}
+	V_\text{loc}(x) \D x
+	\label{eqn:Local}
+\end{equation}
 
 \subsection{Nonlocal part}
 First we discuss the properties of the non-local part.
@@ -250,13 +277,14 @@ is a linear combination of the form
 	\Op{V}_\text{nloc} =
 	\sum_{\vec{R} \in \mathcal{R}}
 	\sum_{l}
+	\sum_{m=-l}^l
 	\sum_{i,j}\
-	\ket{\Op{T}_{\vec{R}}\ p_i^l} h_{ij}^l \bra{\Op{T}_{\vec{R}}\ p_j^l}
+	\ket{\Op{T}_{\vec{R}}\ p_i^{lm}} h_{ij}^l \bra{\Op{T}_{\vec{R}}\ p_j^{lm}}
 \]
 where $l$ runs over all angular momentum channels and
 for each $l$ the $h_{ij}^l$
 are the elements of an Hermitian matrix.
-The $p_i^l(\vec{r})$ are the projection vectors
+The $p_i^{l,m}(\vec{r})$ are the projection vectors
 centred around the atom of the unit cell%
 \footnote{Recall we assume 1 atom per unit cell for now.}.
 The aforementioned analysis continues through to such a linear combination,
@@ -265,12 +293,33 @@ such that its fibers have matrix elements
 	\frac1{\Omega}
 	\sum_{\vec{R} \in \mathcal{R}}
 	\sum_{l}
+	\sum_{m=-l}^l
 	\sum_{i,j}\
-	\hat{p}_i^l(\vec{K} + \vec{k})
+	\hat{p}_i^{lm}(\vec{K} + \vec{k})
 	h_{ij}^l
-	\hat{p}_j^{l\ast}(\vec{K}' + \vec{k})
+	\hat{p}_j^{lm \ast}(\vec{K}' + \vec{k})
 \]
 in a plane wave basis.
+
+Since the projection vectors have the form
+\[ p_i^{lm}(\vec{x}) = R_i^l(x) Y_l^m(\uvec{x}), \]
+Their Fourier transform is
+\begin{align*}
+	\hat{p}_i^{l'm'}(-\vec{k})
+	&= \int_{\R^3} p_i^{l'm'}(\vec{x}) \exp\left(\I \vec{k} \cdot \vec{x}\right) \D\vec{x} \\
+	&= 4 \pi \I^l \sum_{l = 0}^\infty
+	\sum_{m = -l}^l \int_{\R^3}
+	R_i^{l'}(x) Y_{l'}^{m'}(\uvec{x})
+	j_l(k x) Y_l^m(\uvec{k}) Y_l^{m\ast}(\uvec{x})
+	\D\vec{x} \\
+	&= 4 \pi
+	\int_{\R^+} \I^{l'} x^2 R_i^{l'}(x) \ j_{l'}(k x)
+	\
+	Y_{l'}^{m'}(\uvec{k}) \D x,
+\end{align*}
+so again a radial part depending only on $\norm{\vec{k}}$
+times a spherical harmonic of $\uvec{k}$.
+
 
 \section[
 Confirming the GTH and HGH expressions
