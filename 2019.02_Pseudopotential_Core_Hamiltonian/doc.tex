@@ -305,20 +305,20 @@ Since the projection vectors have the form
 \[ p_i^{lm}(\vec{x}) = R_i^l(x) Y_l^m(\uvec{x}), \]
 Their Fourier transform is
 \begin{align*}
-	\hat{p}_i^{l'm'}(-\vec{k})
-	&= \int_{\R^3} p_i^{l'm'}(\vec{x}) \exp\left(\I \vec{k} \cdot \vec{x}\right) \D\vec{x} \\
+	\hat{p}_i^{l'm'}(-\vec{q})
+	&= \int_{\R^3} p_i^{l'm'}(\vec{x}) \exp\left(\I \vec{q} \cdot \vec{x}\right) \D\vec{x} \\
 	&= 4 \pi \I^l \sum_{l = 0}^\infty
 	\sum_{m = -l}^l \int_{\R^3}
 	R_i^{l'}(x) Y_{l'}^{m'}(\uvec{x})
-	j_l(k x) Y_l^m(\uvec{k}) Y_l^{m\ast}(\uvec{x})
+	j_l(q x) Y_l^m(\uvec{q}) Y_l^{m\ast}(\uvec{x})
 	\D\vec{x} \\
 	&= 4 \pi
-	\int_{\R^+} \I^{l'} x^2 R_i^{l'}(x) \ j_{l'}(k x)
+	\int_{\R^+} \I^{l'} x^2 R_i^{l'}(x) \ j_{l'}(q x)
 	\
-	Y_{l'}^{m'}(\uvec{k}) \D x,
+	Y_{l'}^{m'}(\uvec{q}) \D x,
 \end{align*}
-so again a radial part depending only on $\norm{\vec{k}}$
-times a spherical harmonic of $\uvec{k}$.
+so again a radial part depending only on $\norm{\vec{q}}$
+times a spherical harmonic of $\uvec{q}$.
 
 
 \section[
