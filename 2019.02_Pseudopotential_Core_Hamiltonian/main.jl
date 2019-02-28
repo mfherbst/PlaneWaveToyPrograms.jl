@@ -4,16 +4,18 @@
 #      Idea: Evaluate T + V_{ext}
 #            versus
 #            T + V_{ext} + V_{PP} = T + V_{ext} + V_{nl} + V_{loc}
+#
+# As the pseudopotential we implement the Hartwigsen, Goedecker, Hutter
+# separable dual-space Gaussian pseudopotentials
 
 using FFTW
 using LinearAlgebra
 using StaticArrays
-using Unitful
-using UnitfulAtomic
 using PyPlot
 
-# Define Ångström unit
-@unit Å "Å" Ångström (1//10)u"nm" false
+angströmToBohr = 1 / 0.52917721067
+RyToHartree = 1 / 2
+HartreeToEv = 27.21138602
 
 """
 System to be modelled
@@ -84,6 +86,81 @@ end
 # ------------------------------------------------------
 #
 
+"""
+Structure to store the parameters for a
+Hartwigsen, Goedecker, Hutter separable dual-space
+Gaussian pseudopotential (1998).
+"""
+struct PspHgh
+    """Atom number"""
+    atnum::Int
+
+    """Ionic charge (total charge - valence electrons)"""
+    Zion::Float64
+
+    """Range of local Gaussian ionic charge distribution"""
+    rloc::Float64
+
+    """Coefficients for the local part"""
+    c::Vector{Float64}
+
+    """Maximal angular momentum in the non-local part"""
+    lmax::Int
+
+    """Projector radius parameter for each angular momentum"""
+    rp::Vector{Float64}
+
+    """
+    Non-local potential coefficients, one matrix for each AM channel
+    """
+    h::Vector{Matrix{Float64}}
+end
+
+function PspHgh(atnum::Int)
+    if atnum != 14
+        throw(ErrorException("Not implemented"))
+    end
+
+    # Taken from https://www.cp2k.org/static/potentials/abinit/pade/Si-q4
+    Zion = 4.0
+    rloc = 0.44
+    c = [-7.33610297]
+
+    lmax = 1           # i.e. s and p channels
+    rp = [0.42273813,  # s
+          0.48427842]  # p
+    h = [[[5.90692831  -1.26189397];
+          [-1.26189397   3.25819622]], # s
+         2.72701346 * ones(1,1)        # p
+        ]
+    PspHgh(atnum, Zion, rloc, c, lmax, rp, h)
+end
+
+
+function psp_loc_fourier(psp::PspHgh, ΔG)
+    rloc = psp.rloc
+    C(idx) = idx <= length(psp.c) ? psp.c[idx] : 0.0
+    Grsq = sum(abs2, ΔG) * rloc^2
+
+    (
+        - psp.Zion / sum(abs2, ΔG) * exp(-Grsq / 2)
+        + sqrt(π/2) * rloc^3 * exp(-Grsq / 2) * (
+            + C(1)
+            + C(2) * (  3 -       Grsq                       )
+            + C(3) * ( 15 -  10 * Grsq +      Grsq^2         )
+            + C(4) * (105 - 105 * Grsq + 21 * Grsq^2 - Grsq^3)
+        )
+   )
+end
+
+
+
+# TODO Evaluate non-local part in Fourier
+
+#
+# ------------------------------------------------------
+#
+
 """Plane-wave discretisation model for the system"""
 struct Model
     """Volume of the unit cell"""
@@ -94,6 +171,9 @@ struct Model
 
     """Supersampling used during FFT"""
     fft_supersampling::Float64
+
+    """Pseudopotential to be used"""
+    psp::Union{PspHgh, Nothing}
 
     # Derived quantities
     """List of G vectors"""
@@ -122,14 +202,17 @@ struct Model
     ifft_plan::typeof(plan_ifft!(im * randn(2, 2, 2)))
 end
 
+function Model(S::System, Ecut::PspHgh; fft_supersampling=2.)
+    Model(S, nothing, Ecut, fft_supersampling=fft_supersampling)
+end
 
-function Model(S::System, Ecut; fft_supersampling=2.)
+function Model(S::System, psp::Union{PspHgh, Nothing}, Ecut; fft_supersampling=2.)
     # Fill G_coords
     G_coords = Vector{SVector{3, Int}}()
 
     # Figure out upper bound n_max on number of basis functions for any dimension
     # Want |B*(i j k)|^2 <= Ecut
-    n_max = ceil(Int, sqrt(Ecut) / opnorm(S.B))
+    n_max = ceil(Int, 1.5 * sqrt(Ecut) / opnorm(S.B))
 
     # Running index of selected G vectors
     ig = 1
@@ -169,8 +252,8 @@ function Model(S::System, Ecut; fft_supersampling=2.)
     fft_plan = plan_fft!(tmp)
     ifft_plan = plan_ifft!(tmp)
 
-    Model(S.unit_cell_volume, Ecut, fft_supersampling, Gs, G_coords,
-          idx_DC, fft_size, G_to_fft, fft_plan, ifft_plan)
+    Model(S.unit_cell_volume, Ecut, fft_supersampling, psp, Gs,
+          G_coords, idx_DC, fft_size, G_to_fft, fft_plan, ifft_plan)
 end
 
 #
@@ -224,14 +307,36 @@ function kinetic_fourier(M::Model, k::Vector)
 end
 
 
-"""Generator for nuclear attration potential"""
+"""Generator for nuclear attration potential
+matrix element <e_G|V|e_{G+ΔG}>
+"""
 function pot_generator_nuclear(S::System, ΔG)
-    if ΔG == [0,0,0]
+    if norm(ΔG) <= 1e-14  # Should take care of DC component
         return 0.0
     end
+    # abs4(x) = abs2(x)^2
     sum(
-        -4π * S.Zs[i] * sqrt(S.unit_cell_volume) * cis(dot(ΔG, R)) / sum(abs2, ΔG)
+        -4π / S.unit_cell_volume   # spherical Hankel transform prefactor
+        * S.Zs[i] / sum(abs2, ΔG)  # potential
+        * cis(dot(ΔG, R))          # structure factor
         for (i, R) in enumerate(S.atoms)
+    )
+end
+
+
+"""Generator for the local pseudopotential part.
+matrix element <e_G|V|e_{G+ΔG}>
+"""
+function pot_generator_psp_loc(S::System, psp::PspHgh, ΔG)
+    if norm(ΔG) <= 1e-14  # Should take care of DC component
+        return 0.0
+    end
+
+    sum(
+        4π / S.unit_cell_volume    # spherical Hankel transform prefactor
+        * psp_loc_fourier(psp, ΔG) # potential
+        * cis(dot(ΔG, R))          # structure factor
+        for R in S.atoms
     )
 end
 
@@ -241,15 +346,11 @@ function build_potential(M::Model, pot_generator)
     n_G = length(M.Gs)
     V = zeros(ComplexF64, n_G, n_G)
     for ig = 1:n_G, jg = 1:n_G
-        V[ig,jg] = pot_generator(M.Gs[ig] - M.Gs[jg])
+        V[ig, jg] = pot_generator(M.Gs[ig] - M.Gs[jg])
     end
     V
 end
 
-
-function pot_pp_loc_real(S::System, M::Model)
-    # TODO
-end
 
 function pot_pp_nloc_real(S::System, M::Model)
     # TODO
@@ -257,15 +358,20 @@ end
 
 function hamiltonian_fourier(S::System, M::Model, k::Vector)
     Tk = kinetic_fourier(M, k)
-    Vext = build_potential(M, G -> pot_generator_nuclear(S, G))
 
-    # Vloc_real = pot_pp_loc_real(S, M)
-    # Vnloc_real = pot_pp_nloc_real(S, M)
-    # Vpp = r_to_g(Vloc_real + Vnloc_real)
-    Vpp = 0
+    Vext = 0
+    Vpsp = 0
+    if M.psp == nothing
+        Vext = build_potential(M, G -> pot_generator_nuclear(S, G))
+    else
+        Vloc = build_potential(M, G -> pot_generator_psp_loc(S, M.psp, G))
+        # Vnloc = pot_pp_nloc_real(S, M)
+        Vnloc = 0
+        Vpsp = Vloc .+ Vnloc
+    end
 
     # Build and check Hamiltonian
-    Hk = Tk .+ Vext .+ Vpp
+    Hk = Tk .+ Vext .+ Vpsp
     @assert maximum(imag(Hk)) < 1e-12
     Hk = real(Hk)
     @assert maximum(transpose(Hk) - Hk) < 1e-12
@@ -331,27 +437,25 @@ end
 # ------------------------------------------------------
 #
 
-function plot_potential(S::System, M::Model, pot_generator)
-    V_fourier = [pot_generator(G) for G in M.Gs]
+function plot_potential(S::System, M::Model, pot_generator; label="")
+    V_fourier = [pot_generator(G) * sqrt(S.unit_cell_volume)
+                 for G in M.Gs]
+
     V_real = g_to_r(M, V_fourier)
     @assert r_to_g(M, V_real) ≈ V_fourier
 
     # TODO Build x coordinate (using S.A)
     V_cut = [V_real[i,i,i] for i in 1:M.fft_size]
-    figure()
-    eV = uconvert(u"eV", 1u"Eh_au").val
-    plot(V_cut * eV)
-    title("Potential along (x,x,x)")
+    plot(V_cut * HartreeToEv, label=label)
 end
 
 
 function plot_bands(S::System, M::Model, accu_length, ks, λs)
     n_ks, n_bands = size(λs)
-    eV = uconvert(u"eV", 1u"Eh_au").val
 
     figure()
     for ib in 1:n_bands
-        plot(accu_length, eV .* λs[:,ib], "r-")
+        plot(accu_length, HartreeToEv .* λs[:,ib], "r-")
     end
     # legend()
 
@@ -379,17 +483,35 @@ end
 function main()
     # Silicon because it's fun
     Z = 14
-    a = austrip(5.431020504Å)
+    a = 5.431020504 * angströmToBohr
 
-    # Ecut= 45 * (2π / a)^2    # Cutoff for PW basis
-    Ecut= 28 * (2π / a)^2    # Cutoff for PW basis
+    # Ecut= 200 * (2π / a)^2    # Cutoff for PW basis
+    Ecut= 35 * (2π / a)^2    # Cutoff for PW basis
+    # Ecut= 28 * (2π / a)^2    # Cutoff for PW basis
     # Ecut= 10 * (2π / a)^2    # Cutoff for PW basis
-    n_points = 90            # Number of points in kpoints sampling
+    n_points = 50            # Number of points in kpoints sampling
+    # n_points = 90
     n_bands = 10             # Number of bands to compute
 
     # Build structure and PW model
     S = build_diamond_system(a, Z)
-    M = Model(S, Ecut)
+    psp = PspHgh(Z)
+    # M = Model(S, Ecut)
+    M = Model(S, psp, Ecut)
+
+    println("Lattice vectors:")
+    println(S.A)
+
+    if M.psp != nothing
+        println("Pseudopotential:")
+        println(psp)
+    else
+        println("All electron treatment")
+    end
+
+    Gsq = [sum(abs2, G) for G in M.Gs]
+    sp = sortperm(Gsq)
+    Vg = [4π * psp_loc_fourier(psp, G) for G in M.Gs[sp]]
 
     # Construct kpoints for plotting bands:
     # direction:     Λ         Δ         Σ
@@ -400,7 +522,12 @@ function main()
     λs, vs = compute_kpoints(S, M, ks, n_bands=n_bands)
 
     # Plot
-    plot_potential(S, M, G -> pot_generator_nuclear(S, G))
+    figure()
+    plot_potential(S, M, G -> pot_generator_nuclear(S, G), label="nuclear")
+    plot_potential(S, M, G -> pot_generator_psp_loc(S, M.psp, G), label="psp loc")
+    title("Potentials along (x,x,x)")
+    legend()
+
     plot_bands(S, M, accu_length, ks, λs)
 end
 
