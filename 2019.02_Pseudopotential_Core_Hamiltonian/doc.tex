@@ -4,6 +4,7 @@
 \usepackage{todonotes}
 \newcommand{\todoil}{\todo[caption={},inline]}
 
+
 \begin{document}
 \title{Expressions for implementing Goedecker, Teter, Hutter,
 Hartwigsen pseudopotentials}
@@ -88,6 +89,53 @@ sinc-function, we get further
 	V_\text{loc}(x) \D x
 	\label{eqn:Local}
 \end{equation}
+
+\subsection{Regularisation of the Coulombic term}
+Equation \eqref{eqn:Local} cannot be directly used as such
+to compute the part of the matrix element arising from the
+switched-on Coulomb potential term
+\[
+	V_\text{0}(x) =
+	\frac{-Z_\text{ion}}{x} \erf\left( \frac{x}{\sqrt2 r_\text{loc}} \right)
+\]
+since the integral in \eqref{eqn:Local} becomes oscillatory.
+
+As a remedy the potential is interpreted in the sense of a distribution.
+This allows to determine the above integral
+by considering a limiting process over a sequence of more regular integrands.
+The latter we obtain by multiplying $V_\text{soC}(x)$ with the
+regularising screening factor $\exp(- \alpha x)$,
+such that
+\[
+	V_{\alpha}(x) =
+	\frac{-Z_\text{ion}}{x} \erf\left( \frac{x}{\sqrt2 r_\text{loc}} \right)
+	\exp(- \alpha x).
+\]
+Now the relevant integral to compute is
+\[ I_\alpha(q) =
+	\int_{\R^+} \frac{\sin(x q)}{q}\erf\left( \frac{x}{\sqrt2 r_\text{loc}} \right)
+	\exp(- \alpha x) \D x,
+\]
+which can be done, e.g. in Mathematica.
+Afterwards we take the limit $\alpha \rightarrow 0$,
+which results in
+\[
+	I_0(q) = \lim_{\alpha \rightarrow 0} I_\alpha(q)
+	= \frac1{q^2} \exp\left( -\frac{r_\text{loc}^2 q^2}{2}\right).
+\]
+In the sense of distributions this can be defined
+to be the outcome of integrating the integrand
+$I_0$ with a sequence of test functions $\exp(- \alpha x)$ as $\alpha \to 0$.
+This understanding in meaningful here,
+since $V_\text{0}$ is never considered as an expression on its own,
+but only as an operator to be applied to a basis of plane waves.
+Under these considerations we may write its matrix element
+\[
+	\braket{e_{\vec{K}}}{V_0 e_{\vec{K}'}}_\Omega
+	= -\frac{4\pi Z_\text{ion}}{\Omega q^2}
+	\exp\left( -\frac{r_\text{loc}^2 q^2}{2}\right)
+\]
+and similarly compute \eqref{eqn:Local}.
 
 \section{Nonlocal part}
 Next we discuss the properties of the non-local part.
