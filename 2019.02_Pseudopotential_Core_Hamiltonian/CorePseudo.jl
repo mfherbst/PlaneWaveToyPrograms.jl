@@ -13,6 +13,8 @@ using LinearAlgebra
 using StaticArrays
 using PyPlot
 
+include("SphericalHarmonics.jl")
+
 angströmToBohr = 1 / 0.52917721067
 RyToHartree = 1 / 2
 HartreeToEv = 27.21138602
@@ -68,6 +70,7 @@ function build_diamond_system(a, Z)
                   [1 0 1.]
                   [1 1 0.]]
     τ = a / 8 .* @SVector[1, 1, 1]
+    #τ = @SVector[0, 0, 0]
     atoms = [τ, -τ]
     Zs = [Z, Z]
 
@@ -153,16 +156,75 @@ function psp_loc_fourier(psp::PspHgh, ΔG)
    )
 end
 
+"""
+Evaluate a projector at a reciprocal point q. Compared to the rigorous
+derivation in doc.tex this expresison misses a factor i^l to avoid
+complex arithmetic. Compared to the ones presented
+in the GTH and HGH papers it misses a factor of 1/sqrt(Ω), which is added
+by the caller.
+"""
+function eval_projection_vector(psp::PspHgh, i, l, qsq::Number)
+    rp = psp.rp[l + 1]
+    q = sqrt(qsq)
+    qrsq = qsq * rp^2
+    common = 4 * pi^(5 / 4) * sqrt(2^(l + 1) * rp^(2 * l + 3)) * exp(-qrsq / 2)
 
+    if l == 0
+        if i == 1 return common end
+        # Note: In the next case the HGH paper has an error.
+        #       The first 8 in equation (8) should not be under the sqrt-sign
+        #       This is the right version (as shown in the GTH paper)
+        if i == 2 return common *    2  / sqrt(15)  * (3  -   qrsq         ) end
+        if i == 3 return common * (4/3) / sqrt(105) * (15 - 10qrsq + qrsq^2) end
+    end
 
-# TODO Evaluate non-local part in Fourier
+    if l == 1  # verify expressions
+        if i == 1 return common * 1     /    sqrt(3) * q end
+        if i == 2 return common * 2     /  sqrt(105) * q * ( 5 -   qrsq         ) end
+        if i == 3 return common * 4 / 3 / sqrt(1155) * q * (35 - 14qrsq + qrsq^2) end
+    end
+
+    throw(ErrorException("Did not implement case of i == $i and l == $l"))
+end
+
+"""
+Matrix element of the nonlocal part of the pseudopotential.
+Effectively computes <e_G1|V_k|e_G2> where e_G1 and e_G2
+are plane waves and V_k is the fiber of the nonlocal part
+for the k-point k.
+
+Misses the structure factor and a factor of 1 / Ω for consistency
+with the pot_generator functions.
+"""
+function psp_nloc_fourier(psp::PspHgh, k, G1, G2)
+    function calc_b(psp, i, l, m, Gk)
+        qsq = sum(abs2, Gk)
+        proj_il = eval_projection_vector(psp, i, l, qsq)
+        ylm_real(l, m, Gk) * proj_il
+    end
+
+    accu = 0
+    for l in 0:psp.lmax, m in -l:l
+        hp = psp.h[l + 1]
+        @assert ndims(hp) == 2
+        for ij in CartesianIndices(hp)
+            i, j = ij.I
+            accu += (
+                  # (-1)^l *
+                  calc_b(psp, i, l, m, G1 + k)
+                * hp[ij] * calc_b(psp, j, l, m, G2 + k)
+            )
+        end
+    end
+    accu
+end
 
 #
 # ------------------------------------------------------
 #
 
 """Plane-wave discretisation model for the system"""
-struct Model
+mutable struct Model   # mutable is for testing in test_CorePseudo
     """Volume of the unit cell"""
     unit_cell_volume::Float64
 
@@ -224,7 +286,7 @@ function Model(S::System, psp::Union{PspHgh, Nothing}, Ecut; fft_supersampling=2
         end
 
         G = S.B * coord
-        if sum(abs2, G) < Ecut
+        if sum(abs2, G) < Ecut  # + k
             # add to basis
             push!(G_coords,@SVector[i,j,k])
             ig += 1
@@ -318,7 +380,7 @@ function pot_generator_nuclear(S::System, ΔG)
     sum(
         -4π / S.unit_cell_volume   # spherical Hankel transform prefactor
         * S.Zs[i] / sum(abs2, ΔG)  # potential
-        * cis(dot(ΔG, R))          # structure factor
+        * cis(-dot(ΔG, R))          # structure factor
         for (i, R) in enumerate(S.atoms)
     )
 end
@@ -329,13 +391,15 @@ matrix element <e_G|V|e_{G+ΔG}>
 """
 function pot_generator_psp_loc(S::System, psp::PspHgh, ΔG)
     if norm(ΔG) <= 1e-14  # Should take care of DC component
-        return 0.0
+        return 0.0        # (net zero charge)
     end
 
+    pspPWfile = "../../Codes/PWDFT.jl/pseudopotentials/pade_gth/Si-q4.gth"
+    pspPWDFT = PsPot_GTH(pspPWfile)
     sum(
         4π / S.unit_cell_volume    # spherical Hankel transform prefactor
         * psp_loc_fourier(psp, ΔG) # potential
-        * cis(dot(ΔG, R))          # structure factor
+        * cis(-dot(ΔG, R))         # structure factor
         for R in S.atoms
     )
 end
@@ -351,9 +415,19 @@ function build_potential(M::Model, pot_generator)
     V
 end
 
+function pot_psp_nloc_fourier(S::System, M::Model, psp::PspHgh, k::Vector)
+    n_G = length(M.Gs)
+    V = zeros(ComplexF64, n_G, n_G)
+    for ig = 1:n_G, jg = 1:n_G
+        for R in S.atoms
+            pot = psp_nloc_fourier(psp, k, M.Gs[ig], M.Gs[jg])
 
-function pot_pp_nloc_real(S::System, M::Model)
-    # TODO
+            # Add to potential after incorporating structure and volume factors
+            ΔG = M.Gs[ig] - M.Gs[jg]
+            V[ig,jg] += pot * cis(dot(ΔG, R)) / S.unit_cell_volume
+        end
+    end
+    V
 end
 
 function hamiltonian_fourier(S::System, M::Model, k::Vector)
@@ -364,10 +438,9 @@ function hamiltonian_fourier(S::System, M::Model, k::Vector)
     if M.psp == nothing
         Vext = build_potential(M, G -> pot_generator_nuclear(S, G))
     else
-        Vloc = build_potential(M, G -> pot_generator_psp_loc(S, M.psp, G))
-        # Vnloc = pot_pp_nloc_real(S, M)
-        Vnloc = 0
-        Vpsp = Vloc .+ Vnloc
+        Vloc  = build_potential(M, G -> pot_generator_psp_loc(S, M.psp, G))
+        Vnloc = pot_psp_nloc_fourier(S, M, M.psp, k)
+        Vpsp  = Vloc .+ Vnloc
     end
 
     # Build and check Hamiltonian
@@ -397,12 +470,17 @@ function compute_kpoints(S::System, M::Model, kpoints; n_bands=nothing)
     n_bands = something(n_bands, n_G)
     @assert n_bands <= n_G
 
+    println("Total number of k-points: $(length(kpoints))")
+    println("|" * " "^length(kpoints) * "|")
+    print(" ")
     λs = Matrix{Float64}(undef, length(kpoints), n_bands)
     vs = Array{Float64}(undef, length(kpoints), n_G, n_bands)
     for (ik, k) in enumerate(kpoints)
         Hk = hamiltonian_fourier(S, M, k)
         λs[ik, :], vs[ik, :, :] = eigen(Symmetric(Hk), 1:n_bands)
+        print(".")
     end
+    println(" ")
     λs, vs
 end
 
@@ -419,7 +497,7 @@ function kpoints_from_path(S::System, path::Array{Tuple{Symbol,Symbol}}, n_point
                  for p in path]
 
     ks = []
-    accu_k_length = Vector([0.])
+    accu_k_length = Vector([1.])
     for (st, en) in plot_path
         kdiff = (en - st) / n_points
         newks = [st .+ fac .* kdiff for fac in 0:n_points-1]
@@ -446,6 +524,7 @@ function plot_potential(S::System, M::Model, pot_generator; label="")
 
     # TODO Build x coordinate (using S.A)
     V_cut = [V_real[i,i,i] for i in 1:M.fft_size]
+    HartreeToEv = 1
     plot(V_cut * HartreeToEv, label=label)
 end
 
@@ -454,8 +533,9 @@ function plot_bands(S::System, M::Model, accu_length, ks, λs)
     n_ks, n_bands = size(λs)
 
     figure()
+    HartreeToEv = 1
     for ib in 1:n_bands
-        plot(accu_length, HartreeToEv .* λs[:,ib], "r-")
+        plot(accu_length, HartreeToEv .* λs[:,ib], "rx-")
     end
     # legend()
 
@@ -485,13 +565,16 @@ function main()
     Z = 14
     a = 5.431020504 * angströmToBohr
 
-    # Ecut= 200 * (2π / a)^2    # Cutoff for PW basis
-    Ecut= 35 * (2π / a)^2    # Cutoff for PW basis
+    # Ecut= 100 * (2π / a)^2    # Cutoff for PW basis
+    Ecut= 83 * (2π / a)^2    # Cutoff for PW basis  # for 15 below
+    # Ecut= 35 * (2π / a)^2    # Cutoff for PW basis
     # Ecut= 28 * (2π / a)^2    # Cutoff for PW basis
     # Ecut= 10 * (2π / a)^2    # Cutoff for PW basis
-    n_points = 50            # Number of points in kpoints sampling
+    # Ecut= 7 * (2π / a)^2    # Cutoff for PW basis
+    # n_points = 50            # Number of points in kpoints sampling
+    n_points = 10            # Number of points in kpoints sampling
     # n_points = 90
-    n_bands = 10             # Number of bands to compute
+    n_bands = 15             # Number of bands to compute
 
     # Build structure and PW model
     S = build_diamond_system(a, Z)
@@ -499,9 +582,13 @@ function main()
     # M = Model(S, Ecut)
     M = Model(S, psp, Ecut)
 
+    #
+    # Print some statistics
+    #
     println("Lattice vectors:")
     println(S.A)
-
+    println("FFT size: $(M.fft_size)")
+    println("n_G:      $(length(M.Gs))")
     if M.psp != nothing
         println("Pseudopotential:")
         println(psp)
@@ -509,13 +596,12 @@ function main()
         println("All electron treatment")
     end
 
-    Gsq = [sum(abs2, G) for G in M.Gs]
-    sp = sortperm(Gsq)
-    Vg = [4π * psp_loc_fourier(psp, G) for G in M.Gs[sp]]
-
+    #
     # Construct kpoints for plotting bands:
     # direction:     Λ         Δ         Σ
-    plot_path = [(:L, :Γ), (:Γ, :X), (:X, :U), (:K, :Γ)]
+    # plot_path = [(:L, :Γ), (:Γ, :X), (:X, :U), (:K, :Γ)]
+    plot_path = [(:Γ, :X), (:X, :W), (:W, :K), (:K, :Γ), (:Γ, :L),
+                 (:L, :U), (:U, :W), (:W, :L), (:L, :K)]
     ks, accu_length = kpoints_from_path(S, plot_path, n_points)
 
     # Compute along path:
@@ -530,6 +616,7 @@ function main()
 
     plot_bands(S, M, accu_length, ks, λs)
 end
+
 
 if abspath(PROGRAM_FILE) == @__FILE__
     main()
