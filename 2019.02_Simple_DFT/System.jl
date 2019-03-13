@@ -23,6 +23,9 @@ struct System
 
     """High-symmetry points in the reciprocal lattice"""
     high_sym_points::Dict{Symbol, Vector{Float64}}
+
+    """A nice human-readable descriptor for the system"""
+    description::String
 end
 
 """
@@ -33,10 +36,10 @@ atoms  Atom positions
 Z      Atom change (communal to all)
 fft_supersampling   Supersampling used during FFT
 """
-function System(A, atoms, Zs, high_sym_points)
+function System(A, atoms, Zs, high_sym_points, description)
     B = 2π * inv(Array(A'))
     unit_cell_volume = det(A)
-    System(A, atoms, Zs, B, unit_cell_volume, high_sym_points)
+    System(A, atoms, Zs, B, unit_cell_volume, high_sym_points, description)
 end
 
 """
@@ -58,5 +61,5 @@ function build_diamond_system(a, Z)
         :L => 2π/a .* [1/2, 1/2, 1/2],
         :U => 2π/a .* [1/4,   1, 1/4],
     )
-    System(A, atoms, Zs, high_sym_points)
+    System(A, atoms, Zs, high_sym_points, "diamond")
 end
