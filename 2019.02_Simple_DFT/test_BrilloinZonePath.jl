@@ -7,7 +7,7 @@ using PyPlot
 
 # Silicon
 Z = 14
-a = 5.431020504 * angströmToBohr
+a = 5.431020504 * ÅtoBohr
 silicon = build_diamond_system(a, Z)
 
 path = [(:L, :Γ), (:Γ, :X), (:X, :U), (:K, :Γ)]

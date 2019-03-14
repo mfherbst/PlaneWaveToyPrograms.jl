@@ -6,7 +6,7 @@ System to be modelled
 """
 struct System
     """3x3 lattice vectors, in columns. |Γ| = det(A)"""
-    A::Matrix{Float64}
+    A::Matrix{Float64}   # TODO rename
 
     """List of atomic positions in the unit cell"""
     atoms::Vector{Vector{Float64}}
@@ -16,7 +16,7 @@ struct System
 
     # Derived quantities
     """Reciprocal lattice"""
-    B::Matrix{Float64}
+    B::Matrix{Float64}   # TODO rename
 
     """Volume of the unit cell"""
     unit_cell_volume::Float64

@@ -46,6 +46,7 @@ function build_diamond_bzmesh(system::System)
     ]
     weights = [0.0370370370, 0.2962962963, 0.2222222222, 0.4444444444]
     arclength = norm.(diff(kpoints))
+    BrilloinZoneMesh(system, mesh, kpoints, weights, arclength)
 end
 
 
