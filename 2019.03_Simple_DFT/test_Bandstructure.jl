@@ -195,25 +195,10 @@ end
 # ---------------------------------------------------------
 #
 
-function main()
-    #
-    # Setup system (Silicon) and model (Plane Wave basis)
-    #
-    Z = 14
-    a = 5.431020504 * ÅtoBohr
-    silicon = build_diamond_system(a, Z)
-    bkmesh = build_diamond_bzmesh(silicon)
-
-    Ecut = 15  # Hartree
-    pw = PlaneWaveBasis(silicon, bkmesh.kpoints, Ecut)
-    psp = PspHgh("./psp/CP2K-pade-Si-q4.hgh")
-
-    # TODO Minimise Energy wrt. density
-
-
-    #
-    # compare against some reference data
-    #
+"""
+Quickly test a few silicon k points
+"""
+function quicktest_silicon()
     kpoints = [
         [0,0,0],
         [0.229578295126352, 0.229578295126352, 0.000000000000000],
@@ -230,13 +215,37 @@ function main()
         [0.138706889457309, 0.256605657080138, 0.431494061152506,
          0.437698454692923, 0.587160336593700]
     ]
-    pw = substitute_kpoints(pw, kpoints)
-    λs, vs = compute_bands(pw, silicon, psp=psp, n_bands=5)
 
+    Z = 14
+    a = 5.431020504 * ÅtoBohr
+    silicon = build_diamond_system(a, Z)
+    Ecut = 15  # Hartree
+    pw = PlaneWaveBasis(silicon, kpoints, Ecut)
+    psp = PspHgh("./psp/CP2K-pade-Si-q4.hgh")
+
+    λs, vs = compute_bands(pw, silicon, psp=psp, n_bands=5)
     for i in 1:length(ref)
+        println(λs[i] - ref[i])
         @assert maximum(abs.(ref[i] - λs[i])[1:4]) < 1e-8
         @assert maximum(abs.(ref[i] - λs[i])[1:4]) < 1e-4
     end
+end
+
+
+function main()
+    #
+    # Setup system (Silicon) and model (Plane Wave basis)
+    #
+    Z = 14
+    a = 5.431020504 * ÅtoBohr
+    silicon = build_diamond_system(a, Z)
+    bkmesh = build_diamond_bzmesh(silicon)
+
+    Ecut = 15  # Hartree
+    pw = PlaneWaveBasis(silicon, bkmesh.kpoints, Ecut)
+    psp = PspHgh("./psp/CP2K-pade-Si-q4.hgh")
+
+    # TODO Minimise Energy wrt. density
 
     #
     # Compute and plot bands
