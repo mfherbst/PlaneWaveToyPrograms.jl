@@ -14,26 +14,24 @@ using IterativeSolvers
 #
 # Terms
 #
-"""A k-Block of the kinetic operator"""
+"""A k-Block of the kinetic matrix"""
 struct KineticBlock
     pw::PlaneWaveBasis
     idx_kpoint::Int
+    size::Tuple{Int,Int}
+    data::Array{Float64,2}  # TODO temporary
 end
-function LinearAlgebra.mul!(Y::AbstractMatrix, A::KineticBlock, B::AbstractMatrix)
-    # TODO
-end
-
-
-"""Build the kinetic energy matrix"""
-function kinetic(pw::PlaneWaveBasis, idx_kpoint::Int)
+function KineticBlock(pw::PlaneWaveBasis, idx_kpoint::Int)
     n_G = length(pw.Gmask[idx_kpoint])
     k = pw.kpoints[idx_kpoint]
-    T = zeros(ComplexF64, n_G, n_G)
+    Tk = zeros(ComplexF64, n_G, n_G)
     for (icont, ig) in enumerate(pw.Gmask[idx_kpoint])
-        T[icont, icont] = sum(abs2, k + pw.Gs[ig]) / 2
+        Tk[icont, icont] = sum(abs2, k + pw.Gs[ig]) / 2
     end
-    T
+    KineticBlock(pw, idx_kpoint, size(Tk), Tk)
 end
+LinearAlgebra.mul!(Y::SubArray, Tk::KineticBlock, B::SubArray) = mul!(Y, Tk.data, B)
+Base.size(Tk::KineticBlock) = Tk.size
 
 
 """Nuclear attration potential matrix element <e_G|V|e_{G+ΔG}>"""
@@ -50,8 +48,15 @@ function elem_nuclear_attration(ΔG, system::System)
 end
 
 
-"""Build full matrix of nuclear attraction potential"""
-function pot_nuclear_attration(pw::PlaneWaveBasis, idx_kpoint::Int, system::System)
+"""A k-Block of the nuclear attraction matrix"""
+struct NuclearAttractionBlock
+    pw::PlaneWaveBasis
+    idx_kpoint::Int
+    system::System
+    size::Tuple{Int,Int}
+    data::Array{ComplexF64,2}  # TODO temporary
+end
+function NuclearAttractionBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System)
     n_G = length(pw.Gmask[idx_kpoint])
     V = zeros(ComplexF64, n_G, n_G)
     for (icont, ig) in enumerate(pw.Gmask[idx_kpoint]),
@@ -59,8 +64,9 @@ function pot_nuclear_attration(pw::PlaneWaveBasis, idx_kpoint::Int, system::Syst
         ΔG = system.Gs[ig] - system.Gs[jg]
         V[icont, jcont] = elem_nuclear_attration(ΔG, system)
     end
-    V
+    NuclearAttractionBlock(pw, idx_kpoint, system, size(V), V)
 end
+LinearAlgebra.mul!(Y::SubArray, Vk::NuclearAttractionBlock, B::SubArray) = mul!(Y, Vk.data, B)
 
 
 """
@@ -94,10 +100,16 @@ function elem_psp_nloc(k, G1, G2, psp::PspHgh)
 end
 
 
-"""
-Build the full matrix for the nonlocal part of the pseudopotential
-"""
-function pot_psp_nloc(pw::PlaneWaveBasis, idx_kpoint::Int, system::System, psp::PspHgh)
+"""A k-Block of the non-local part of the pseudopotential"""
+struct PspNonLocalBlock
+    pw::PlaneWaveBasis
+    idx_kpoint::Int
+    system::System
+    psp::PspHgh
+    size::Tuple{Int,Int}
+    data::Array{ComplexF64,2}  # TODO temporary
+end
+function PspNonLocalBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System, psp::PspHgh)
     k = pw.kpoints[idx_kpoint]
     n_G = length(pw.Gmask[idx_kpoint])
     V = zeros(ComplexF64, n_G, n_G)
@@ -112,8 +124,9 @@ function pot_psp_nloc(pw::PlaneWaveBasis, idx_kpoint::Int, system::System, psp::
             V[icont, jcont] += pot * cis(dot(ΔG, R)) / system.unit_cell_volume
         end
     end
-    V
+    PspNonLocalBlock(pw, idx_kpoint, system, psp, size(V), V)
 end
+LinearAlgebra.mul!(Y::SubArray, Vk::PspNonLocalBlock, B::SubArray) = mul!(Y, Vk.data, B)
 
 
 """
@@ -133,8 +146,16 @@ function elem_psp_loc(ΔG, system::System, psp::PspHgh)
 end
 
 
-"""Build full matrix of local pseudopotential part"""
-function pot_psp_loc(pw::PlaneWaveBasis, idx_kpoint::Int, system::System, psp::PspHgh)
+"""A k-Block of the local part of the pseudopotential"""
+struct PspLocalBlock
+    pw::PlaneWaveBasis
+    idx_kpoint::Int
+    system::System
+    psp::PspHgh
+    size::Tuple{Int,Int}
+    data::Array{ComplexF64,2}  # TODO temporary
+end
+function PspLocalBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System, psp::PspHgh)
     k = pw.kpoints[idx_kpoint]
     n_G = length(pw.Gmask[idx_kpoint])
     V = zeros(ComplexF64, n_G, n_G)
@@ -144,37 +165,57 @@ function pot_psp_loc(pw::PlaneWaveBasis, idx_kpoint::Int, system::System, psp::P
         ΔG = pw.Gs[ig] - pw.Gs[jg]
         V[icont, jcont] = elem_psp_loc(ΔG, system, psp)
     end
-    V
+    PspLocalBlock(pw, idx_kpoint, system, psp, size(V), V)
 end
+LinearAlgebra.mul!(Y::SubArray, Vk::PspLocalBlock, B::SubArray) = mul!(Y, Vk.data, B)
 
 
-struct HamiltonianBlock
-    data::Matrix
+struct HamiltonianBlock{LocalPotential, NonLocalPotential}
+    pw::PlaneWaveBasis
+    idx_kpoint::Int
+    size::Tuple{Int,Int}
+
+    T_k::KineticBlock
+    Vloc_k::LocalPotential
+    Vnloc_k::NonLocalPotential
 end
 function HamiltonianBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System;
-                          psp::Union{PspHgh,Nothing})
-    T = kinetic(pw, idx_kpoint)
-
-    Vext = 0
-    Vpsp = 0
-    if psp == nothing
-        Vext = pot_nuclear_attration(pw, idx_kpoint, system)
-    else
-        Vloc = pot_psp_loc(pw, idx_kpoint, system, psp)
-        Vnloc = pot_psp_nloc(pw, idx_kpoint, system, psp)
-        Vpsp  = Vloc .+ Vnloc
-    end
-
-    # Build and check Hamiltonian
-    H = T .+ Vext .+ Vpsp
-    @assert maximum(abs.(conj(transpose(H)) - H)) < 1e-12
-    HamiltonianBlock(H)
+                          psp::PspHgh)
+    T_k = KineticBlock(pw::PlaneWaveBasis, idx_kpoint::Int)
+    Vloc_k = PspLocalBlock(pw, idx_kpoint, system, psp)
+    Vnloc_k = PspNonLocalBlock(pw, idx_kpoint, system, psp)
+    PspNonLocalBlock(pw, idx_kpoint, system, psp)
+    HamiltonianBlock(pw, idx_kpoint, size(T_k), T_k, Vloc_k, Vnloc_k)
 end
-LinearAlgebra.mul!(Y::Matrix, A::HamiltonianBlock, B::Matrix)     = mul!(Y, A.data, B)
-LinearAlgebra.mul!(Y::Vector, A::HamiltonianBlock, B::Vector)     = mul!(Y, A.data, B)
-LinearAlgebra.mul!(Y::SubArray, A::HamiltonianBlock, B::SubArray) = mul!(Y, A.data, B)
-Base.size(H::HamiltonianBlock, idx::Int) = size(H.data)[idx]
-Base.eltype(H::HamiltonianBlock) = eltype(H.data)
+function HamiltonianBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System)
+    T_k = KineticBlock(pw::PlaneWaveBasis, idx_kpoint::Int)
+    Vloc_k = NuclearAttractionBlock(pw, idx_kpoint, system)
+    HamiltonianBlock(pw, idx_kpoint, size(T_k), T_k, Vloc_k, nothing)
+end
+function LinearAlgebra.mul!(Y::Matrix, H::HamiltonianBlock, B::Matrix)
+    mul!(view(Y,:,:), H, view(B, :, :))
+end
+function LinearAlgebra.mul!(Y::Vector, H::HamiltonianBlock, B::Vector)
+    mul!(view(Y,:,1), H, view(B, :, 1))
+end
+function LinearAlgebra.mul!(Y::SubArray, H::HamiltonianBlock{T, Nothing} where T,
+                            B::SubArray)
+    mul!(Y, H.T_k, B)
+    Y2 = similar(Y)
+    mul!(view(Y2,:,:), H.Vloc_k, B)
+    Y .+= Y2
+end
+function LinearAlgebra.mul!(Y::SubArray, H::HamiltonianBlock, B::SubArray)
+    mul!(Y, H.T_k, B)
+    Y2 = similar(Y)
+    mul!(view(Y2,:,:), H.Vloc_k, B)
+    Y .+= Y2
+    mul!(view(Y2,:,:), H.Vnloc_k, B)
+    Y .+= Y2
+end
+Base.size(H::HamiltonianBlock, idx::Int) = H.size[idx]
+Base.size(H::HamiltonianBlock) = H.size
+Base.eltype(H::HamiltonianBlock) = ComplexF64
 
 #
 # ---------------------------------------------------------
@@ -201,7 +242,7 @@ function compute_bands(pw::PlaneWaveBasis, system::System;
     pbar = Progress(n_k, desc="Computing k points: ",
                     dt=0.5, barglyphs=BarGlyphs("[=> ]"))
     for idx_kpoint in 1:n_k
-        H = HamiltonianBlock(pw, idx_kpoint, system, psp=psp).data
+        H = HamiltonianBlock(pw, idx_kpoint, system, psp=psp)
         largest = false  # Want smallest eigenpairs
         res = lobpcg(H, largest, n_bands)
         @assert maximum(imag(res.λ)) < 1e-12
@@ -243,6 +284,11 @@ function quicktest_silicon()
     Ecut = 15  # Hartree
     pw = PlaneWaveBasis(silicon, kpoints, Ecut)
     psp = PspHgh("./psp/CP2K-pade-Si-q4.hgh")
+
+    opH = HamiltonianBlock(pw, 1, silicon; psp=psp)
+    H = Matrix{Float64}(undef, size(opH))
+    mul!(H, opH, Matrix{Float64}(I, size(opH)))
+    @assert maximum(abs.(conj(transpose(H)) - H)) < 1e-12
 
     λs, vs = compute_bands(pw, silicon, psp=psp, n_bands=5)
     for i in 1:length(ref)
