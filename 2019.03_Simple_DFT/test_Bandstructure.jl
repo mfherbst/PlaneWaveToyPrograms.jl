@@ -9,10 +9,21 @@ include("PspHgh.jl")
 using LinearAlgebra
 using PyPlot
 using ProgressMeter
+using IterativeSolvers
 
 #
 # Terms
 #
+"""A k-Block of the kinetic operator"""
+struct KineticBlock
+    pw::PlaneWaveBasis
+    idx_kpoint::Int
+end
+function LinearAlgebra.mul!(Y::AbstractMatrix, A::KineticBlock, B::AbstractMatrix)
+    # TODO
+end
+
+
 """Build the kinetic energy matrix"""
 function kinetic(pw::PlaneWaveBasis, idx_kpoint::Int)
     n_G = length(pw.Gmask[idx_kpoint])
@@ -137,10 +148,11 @@ function pot_psp_loc(pw::PlaneWaveBasis, idx_kpoint::Int, system::System, psp::P
 end
 
 
-"""Build full hamiltonian for a particular kpoint"""
-
-function hamiltonian_fourier(pw::PlaneWaveBasis, idx_kpoint::Int, system::System;
-                             psp::Union{PspHgh,Nothing})
+struct HamiltonianBlock
+    data::Matrix
+end
+function HamiltonianBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System;
+                          psp::Union{PspHgh,Nothing})
     T = kinetic(pw, idx_kpoint)
 
     Vext = 0
@@ -156,9 +168,17 @@ function hamiltonian_fourier(pw::PlaneWaveBasis, idx_kpoint::Int, system::System
     # Build and check Hamiltonian
     H = T .+ Vext .+ Vpsp
     @assert maximum(abs.(conj(transpose(H)) - H)) < 1e-12
-    H
+    HamiltonianBlock(H)
 end
+LinearAlgebra.mul!(Y::Matrix, A::HamiltonianBlock, B::Matrix)     = mul!(Y, A.data, B)
+LinearAlgebra.mul!(Y::Vector, A::HamiltonianBlock, B::Vector)     = mul!(Y, A.data, B)
+LinearAlgebra.mul!(Y::SubArray, A::HamiltonianBlock, B::SubArray) = mul!(Y, A.data, B)
+Base.size(H::HamiltonianBlock, idx::Int) = size(H.data)[idx]
+Base.eltype(H::HamiltonianBlock) = eltype(H.data)
 
+#
+# ---------------------------------------------------------
+#
 
 """
 Take a system and a PlaneWaveBasis and compute
@@ -176,16 +196,17 @@ function compute_bands(pw::PlaneWaveBasis, system::System;
     @assert n_bands <= n_G_min
 
     λs = Vector{Vector{Float64}}(undef, n_k)
-    vs = Vector{Matrix{Float64}}(undef, n_k)
+    vs = Vector{Matrix{ComplexF64}}(undef, n_k)
 
     pbar = Progress(n_k, desc="Computing k points: ",
                     dt=0.5, barglyphs=BarGlyphs("[=> ]"))
     for idx_kpoint in 1:n_k
-        H = hamiltonian_fourier(pw, idx_kpoint, system, psp=psp)
-        @assert maximum(imag(H)) < 1e-12
-        H = Symmetric(real(H))
-        λs[idx_kpoint], vs[idx_kpoint] = eigen(H, 1:n_bands)
-
+        H = HamiltonianBlock(pw, idx_kpoint, system, psp=psp).data
+        largest = false  # Want smallest eigenpairs
+        res = lobpcg(H, largest, n_bands)
+        @assert maximum(imag(res.λ)) < 1e-12
+        λs[idx_kpoint] = real(res.λ)
+        vs[idx_kpoint] = res.X
         next!(pbar)
     end
     λs, vs
