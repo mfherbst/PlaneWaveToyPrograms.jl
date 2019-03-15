@@ -22,7 +22,7 @@ struct PlaneWaveBasis
     kpoint, such that the resulting plane-wave basis reaches the
     selected Ecut threshold.
     """
-    pw_mask::Vector{Vector{Int}}
+    Gmask::Vector{Vector{Int}}
 
     #
     # Fast-fourier transform
@@ -67,9 +67,9 @@ function PlaneWaveBasis(system::System, kpoints::Vector{Vector{Float64}}, Ecut;
 
     # Select the Gs falling in the energy range determined by Ecut
     # for each kpoint
-    pw_mask = fill(Vector{Int}, length(kpoints))
+    Gmash = Vector{Vector{Int}}(undef, length(kpoints))
     for (ik, k) in enumerate(kpoints)
-        pw_mask[ik] = findall(G -> sum(abs2, k + G) ≤ 2 * Ecut, Gs)
+        Gmash[ik] = findall(G -> sum(abs2, k + G) ≤ 2 * Ecut, Gs)
     end
 
     # Maximal and minimal coordinates along each direction
@@ -77,19 +77,19 @@ function PlaneWaveBasis(system::System, kpoints::Vector{Vector{Float64}}, Ecut;
     min_coords = minimum(abs.(hcat(coords...)), dims=2)
 
     # Form and optimise FFT grid dimensions
-    fft_size = optimise_fft_grid(max_coords .- min_coords + 1)
-    println("fft_size: $fft_size")
+    fft_size = reshape(max_coords .- min_coords .+ 1, :)
+    fft_size = optimise_fft_grid(fft_size)
 
     # Translation table from plane-wave to FFT grid
     n_G = length(Gs)
     idx_to_fft = [1 .+ mod.(coords[ig], fft_size) for ig in 1:n_G]
 
     tmp = Array{ComplexF64}(undef, fft_size...)
-    fft_plan = plan_fft!(tmp)
-    ifft_plan = plan_ifft!(tmp)
+    fft_plan = plan_fft!(tmp)  # can play with FFTW flags here
+    ifft_plan = plan_ifft(tmp) # can play with FFTW flags here
 
     PlaneWaveBasis(kpoints, system.unit_cell_volume, Ecut, Gs,
-                   idx_DC, pw_mask, fft_supersampling, fft_size,
+                   idx_DC, Gmash, fft_supersampling, fft_size,
                    idx_to_fft, fft_plan, ifft_plan)
 end
 
@@ -113,7 +113,7 @@ resulting cutoff is reached at all points, that is that
 for all kpoints k and plane-wave vectors G, we have
 |k + G|^2 ≤ cutoff_Gsq
 """
-function construct_pw_grid(system::System, cutoff_Gsq::Float64;
+function construct_pw_grid(system::System, cutoff_Gsq::Number;
                            kpoints::Vector{Vector{Float64}} = [[0, 0, 0]])
     B = system.B  # Reciprocal lattice vectors
 
@@ -167,14 +167,14 @@ Take an existing Plane-wave basis and replace its kpoints without altering
 the plane-wave vectors, i.e. without altering the Gs
 """
 function substitute_kpoints(pw::PlaneWaveBasis, kpoints::Vector{Vector{Float64}})
-    # Compute new pw_mask and substitute the old one
-    pw_mask = fill(Vector{Int}, length(kpoints))
+    # Compute new Gmask and substitute the old one
+    Gmask = Vector{Vector{Int}}(undef, length(kpoints))
     for (ik, k) in enumerate(kpoints)
-        pw_mask[ik] = findall(G -> sum(abs2, k + G) ≤ 2 * Ecut, Gs)
+        Gmask[ik] = findall(G -> sum(abs2, k + G) ≤ 2 * pw.Ecut, pw.Gs)
     end
 
     PlaneWaveBasis(kpoints, pw.unit_cell_volume, pw.Ecut, pw.Gs,
-                   pw.idx_DC, pw_mask, pw.fft_supersampling, pw.fft_size,
+                   pw.idx_DC, Gmask, pw.fft_supersampling, pw.fft_size,
                    pw.idx_to_fft, pw.FFT, pw.iFFT)
 end
 
