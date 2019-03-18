@@ -18,20 +18,22 @@ using IterativeSolvers
 struct KineticBlock
     pw::PlaneWaveBasis
     idx_kpoint::Int
-    size::Tuple{Int,Int}
-    data::Array{Float64,2}  # TODO temporary
+
+    """Cache for the terms |G + k|^2; size: n_G"""
+    qsq::Vector{Float64}
 end
 function KineticBlock(pw::PlaneWaveBasis, idx_kpoint::Int)
     n_G = length(pw.Gmask[idx_kpoint])
-    k = pw.kpoints[idx_kpoint]
-    Tk = zeros(ComplexF64, n_G, n_G)
+    qsq = Vector{Float64}(undef, n_G)
     for (icont, ig) in enumerate(pw.Gmask[idx_kpoint])
-        Tk[icont, icont] = sum(abs2, k + pw.Gs[ig]) / 2
+        qsq[icont] = sum(abs2, pw.Gs[ig] + pw.kpoints[idx_kpoint])
     end
-    KineticBlock(pw, idx_kpoint, size(Tk), Tk)
+    KineticBlock(pw, idx_kpoint, qsq)
 end
-LinearAlgebra.mul!(Y::SubArray, Tk::KineticBlock, B::SubArray) = mul!(Y, Tk.data, B)
-Base.size(Tk::KineticBlock) = Tk.size
+function LinearAlgebra.mul!(Y::SubArray, Tk::KineticBlock, B::SubArray)
+    Y .= Diagonal(Tk.qsq / 2) * B
+end
+Base.size(Tk::KineticBlock) = (length(Tk.qsq), length(Tk.qsq))
 
 
 """Nuclear attration potential matrix element <e_G|V|e_{G+ΔG}>"""
@@ -53,7 +55,6 @@ struct NuclearAttractionBlock
     pw::PlaneWaveBasis
     idx_kpoint::Int
     system::System
-    size::Tuple{Int,Int}
     data::Array{ComplexF64,2}  # TODO temporary
 end
 function NuclearAttractionBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System)
@@ -64,9 +65,49 @@ function NuclearAttractionBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::Sys
         ΔG = system.Gs[ig] - system.Gs[jg]
         V[icont, jcont] = elem_nuclear_attration(ΔG, system)
     end
-    NuclearAttractionBlock(pw, idx_kpoint, system, size(V), V)
+    NuclearAttractionBlock(pw, idx_kpoint, system, V)
 end
 LinearAlgebra.mul!(Y::SubArray, Vk::NuclearAttractionBlock, B::SubArray) = mul!(Y, Vk.data, B)
+
+
+"""
+Local pseudopotential part matrix element <e_G|V|e_{G+ΔG}>
+"""
+function elem_psp_loc(ΔG, system::System, psp::PspHgh)
+    if norm(ΔG) <= 1e-14  # Should take care of DC component
+        return 0.0        # (net zero charge)
+    end
+
+    sum(
+        4π / system.unit_cell_volume    # spherical Hankel transform prefactor
+        * psp_loc(psp, ΔG)              # potential
+        * cis(-dot(ΔG, R))              # structure factor
+        for R in system.atoms
+    )
+end
+
+
+"""A k-Block of the local part of the pseudopotential"""
+struct PspLocalBlock
+    pw::PlaneWaveBasis
+    idx_kpoint::Int
+    system::System
+    psp::PspHgh
+    data::Array{ComplexF64,2}  # TODO temporary
+end
+function PspLocalBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System, psp::PspHgh)
+    k = pw.kpoints[idx_kpoint]
+    n_G = length(pw.Gmask[idx_kpoint])
+    V = zeros(ComplexF64, n_G, n_G)
+
+    for (icont, ig) in enumerate(pw.Gmask[idx_kpoint]),
+            (jcont, jg) in enumerate(pw.Gmask[idx_kpoint])
+        ΔG = pw.Gs[ig] - pw.Gs[jg]
+        V[icont, jcont] = elem_psp_loc(ΔG, system, psp)
+    end
+    PspLocalBlock(pw, idx_kpoint, system, psp, V)
+end
+LinearAlgebra.mul!(Y::SubArray, Vk::PspLocalBlock, B::SubArray) = mul!(Y, Vk.data, B)
 
 
 """
@@ -80,7 +121,7 @@ Misses the structure factor and a factor of 1 / Ω.
 function elem_psp_nloc(k, G1, G2, psp::PspHgh)
     function calc_b(psp, i, l, m, Gk)
         qsq = sum(abs2, Gk)
-        proj_il = eval_projection_vector(psp, i, l, qsq)
+        proj_il = eval_projection_radial(psp, i, l, qsq)
         ylm_real(l, m, Gk) * proj_il
     end
 
@@ -144,30 +185,6 @@ function elem_psp_loc(ΔG, system::System, psp::PspHgh)
         for R in system.atoms
     )
 end
-
-
-"""A k-Block of the local part of the pseudopotential"""
-struct PspLocalBlock
-    pw::PlaneWaveBasis
-    idx_kpoint::Int
-    system::System
-    psp::PspHgh
-    size::Tuple{Int,Int}
-    data::Array{ComplexF64,2}  # TODO temporary
-end
-function PspLocalBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System, psp::PspHgh)
-    k = pw.kpoints[idx_kpoint]
-    n_G = length(pw.Gmask[idx_kpoint])
-    V = zeros(ComplexF64, n_G, n_G)
-
-    for (icont, ig) in enumerate(pw.Gmask[idx_kpoint]),
-            (jcont, jg) in enumerate(pw.Gmask[idx_kpoint])
-        ΔG = pw.Gs[ig] - pw.Gs[jg]
-        V[icont, jcont] = elem_psp_loc(ΔG, system, psp)
-    end
-    PspLocalBlock(pw, idx_kpoint, system, psp, size(V), V)
-end
-LinearAlgebra.mul!(Y::SubArray, Vk::PspLocalBlock, B::SubArray) = mul!(Y, Vk.data, B)
 
 
 struct HamiltonianBlock{LocalPotential, NonLocalPotential}
