@@ -11,6 +11,8 @@ using PyPlot
 using ProgressMeter
 using IterativeSolvers
 
+# TODO qsq should only be computed once for each k
+
 #
 # Terms
 #
@@ -110,80 +112,107 @@ end
 LinearAlgebra.mul!(Y::SubArray, Vk::PspLocalBlock, B::SubArray) = mul!(Y, Vk.data, B)
 
 
-"""
-Matrix element of the nonlocal part of the pseudopotential.
-Effectively computes <e_G1|V_k|e_G2> where e_G1 and e_G2
-are plane waves and V_k is the fiber of the nonlocal part
-for the k-point k.
-
-Misses the structure factor and a factor of 1 / Ω.
-"""
-function elem_psp_nloc(k, G1, G2, psp::PspHgh)
-    function calc_b(psp, i, l, m, Gk)
-        qsq = sum(abs2, Gk)
-        proj_il = eval_projection_radial(psp, i, l, qsq)
-        ylm_real(l, m, Gk) * proj_il
-    end
-
-    accu = 0
-    for l in 0:psp.lmax, m in -l:l
-        hp = psp.h[l + 1]
-        @assert ndims(hp) == 2
-        for ij in CartesianIndices(hp)
-            i, j = ij.I
-            accu += (
-                  calc_b(psp, i, l, m, G1 + k)
-                * hp[ij] * calc_b(psp, j, l, m, G2 + k)
-            )
-        end
-    end
-    accu
-end
-
-
 """A k-Block of the non-local part of the pseudopotential"""
 struct PspNonLocalBlock
     pw::PlaneWaveBasis
     idx_kpoint::Int
-    system::System
-    psp::PspHgh
-    size::Tuple{Int,Int}
-    data::Array{ComplexF64,2}  # TODO temporary
+
+    """
+    Cache for the projection vectors. For each l the Vector
+    contains an array of size (n_G, n_proj, 2*lmax+1),
+    where n_proj are the number of projectors for this l.
+
+    These quantities are called ̂p_i^{l,m} in doc.tex. Note,
+    that compared to doc.tex these quantities miss the factor
+    i^l to stay in real arithmetic for them.
+    """
+    projection_vectors::Vector{Array{Float64, 3}}
+
+    """The coefficients to employ between projection vectors"""
+    projection_coefficients::Vector{Matrix{Float64}}
+
+    """
+    Cache for the structure factor
+    """
+    structure_factor::Matrix{ComplexF64}
 end
 function PspNonLocalBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System, psp::PspHgh)
     k = pw.kpoints[idx_kpoint]
     n_G = length(pw.Gmask[idx_kpoint])
-    V = zeros(ComplexF64, n_G, n_G)
+    n_atoms = length(system.atoms)
 
-    for (icont, ig) in enumerate(pw.Gmask[idx_kpoint]),
-            (jcont, jg) in enumerate(pw.Gmask[idx_kpoint])
-        for R in system.atoms
-            pot = elem_psp_nloc(k, pw.Gs[ig], pw.Gs[jg], psp)
+    # Evaluate projection vectors
+    projection_vectors = Vector{Array{Float64, 3}}(undef, psp.lmax + 1)
+    for l in 0:psp.lmax
+        n_proj = size(psp.h[l + 1], 1)
+        proj_l = zeros(Float64, n_G, n_proj, 2l + 1)
+        for m in -l:l
+            for iproj in 1:n_proj
+                for (icont, ig) in enumerate(pw.Gmask[idx_kpoint])
+                    # Compute projector for q and add it to proj_l
+                    # including structure factor
+                    q = pw.Gs[ig] + k
+                    radial_il = eval_projection_radial(psp, iproj, l, sum(abs2, q))
+                    proj_l[icont, iproj, l + m + 1] = radial_il * ylm_real(l, m, q)
+                    # im^l *
+                end # ig
+            end  # iproj
+        end  # m
+        projection_vectors[l + 1] = proj_l
+    end  # l
 
-            # Add to potential after incorporating structure and volume factors
-            ΔG = pw.Gs[ig] - pw.Gs[jg]
-            V[icont, jcont] += pot * cis(dot(ΔG, R)) / system.unit_cell_volume
+    structure_factor = Matrix{ComplexF64}(undef, n_G, length(system.atoms))
+    for (iatom, R) in enumerate(system.atoms)
+        for (icont, ig) in enumerate(pw.Gmask[idx_kpoint])
+            structure_factor[icont, iatom] = cis(dot(R, pw.Gs[ig]))
         end
     end
-    PspNonLocalBlock(pw, idx_kpoint, system, psp, size(V), V)
+
+    projection_coefficients = psp.h
+    PspNonLocalBlock(pw, idx_kpoint, projection_vectors, projection_coefficients,
+                     structure_factor)
 end
-LinearAlgebra.mul!(Y::SubArray, Vk::PspNonLocalBlock, B::SubArray) = mul!(Y, Vk.data, B)
+function LinearAlgebra.mul!(Y::SubArray, Vk::PspNonLocalBlock, B::SubArray)
+    n_G, n_vec = size(B)
+    n_atoms = size(Vk.structure_factor, 2)
+    lmax = length(Vk.projection_vectors) - 1
 
+    # TODO Maybe precompute this?
+    # Amend projection vector by structure factor
+    projsf = [
+        broadcast(*, reshape(Vk.projection_vectors[l + 1], n_G, :, 2l+1, 1),
+                  reshape(Vk.structure_factor, n_G, 1, 1, n_atoms))
+        for l in 0:lmax
+    ]
 
-"""
-Local pseudopotential part matrix element <e_G|V|e_{G+ΔG}>
-"""
-function elem_psp_loc(ΔG, system::System, psp::PspHgh)
-    if norm(ΔG) <= 1e-14  # Should take care of DC component
-        return 0.0        # (net zero charge)
+    # Compute product of transposed projection operator
+    # times B for each angular momentum l
+    projtB = Vector{Array{ComplexF64, 4}}(undef, lmax + 1)
+    for l in 0:lmax
+        n_proj = size(Vk.projection_vectors[l + 1], 2)
+        projsf_l = projsf[l + 1]
+        @assert size(projsf_l) == (n_G, n_proj, 2l + 1, n_atoms)
+
+        # TODO use dot
+        # Perform application of projector times B as matrix-matrix product
+        projtB_l = conj(transpose(reshape(projsf_l, n_G, :))) *  B
+        @assert size(projtB_l) ==  (n_proj * (2l + 1) * n_atoms, n_vec)
+
+        projtB[l + 1] = reshape(projtB_l, n_proj, 2l + 1, n_atoms, n_vec)
     end
 
-    sum(
-        4π / system.unit_cell_volume    # spherical Hankel transform prefactor
-        * psp_loc(psp, ΔG)              # potential
-        * cis(-dot(ΔG, R))              # structure factor
-        for R in system.atoms
-    )
+    # Compute contraction of above result with coefficients h
+    # and another projector
+    Ω = Vk.pw.unit_cell_volume
+    Y[:] = zeros(ComplexF64, n_G, n_vec)
+    for l in 0:lmax, midx in 1:2l + 1, iatom in 1:n_atoms
+        h_l = Vk.projection_coefficients[l + 1]
+        projsf_l = projsf[l + 1]
+        projtB_l = projtB[l + 1]
+        Y .+= projsf_l[:, :, midx, iatom] * (h_l * projtB_l[:, midx, iatom, :] / Ω)
+    end
+
+    Y
 end
 
 
@@ -224,9 +253,10 @@ function LinearAlgebra.mul!(Y::SubArray, H::HamiltonianBlock{T, Nothing} where T
 end
 function LinearAlgebra.mul!(Y::SubArray, H::HamiltonianBlock, B::SubArray)
     mul!(Y, H.T_k, B)
-    Y2 = similar(Y)
+    Y2 = Array{ComplexF64}( undef, size(Y))
     mul!(view(Y2,:,:), H.Vloc_k, B)
     Y .+= Y2
+    Y2 = Array{ComplexF64}( undef, size(Y))
     mul!(view(Y2,:,:), H.Vnloc_k, B)
     Y .+= Y2
 end
@@ -262,6 +292,12 @@ function compute_bands(pw::PlaneWaveBasis, system::System;
         H = HamiltonianBlock(pw, idx_kpoint, system, psp=psp)
         largest = false  # Want smallest eigenpairs
         res = lobpcg(H, largest, n_bands)
+        # Preconditioner: P = (k^2 + α) where α is the average kinetic energy
+        #                               of the bands of interest
+        #
+        #                               This mostly affects the high-kinetic energy parts
+        #                               of the Hamiltonian and decreases their size
+        #                               thus making the Hamiltonian more well-conditioned
         @assert maximum(imag(res.λ)) < 1e-12
         λs[idx_kpoint] = real(res.λ)
         vs[idx_kpoint] = res.X
@@ -302,10 +338,12 @@ function quicktest_silicon()
     pw = PlaneWaveBasis(silicon, kpoints, Ecut)
     psp = PspHgh("./psp/CP2K-pade-Si-q4.hgh")
 
+    # Check on the Hamiltonian
     opH = HamiltonianBlock(pw, 1, silicon; psp=psp)
-    H = Matrix{Float64}(undef, size(opH))
-    mul!(H, opH, Matrix{Float64}(I, size(opH)))
-    @assert maximum(abs.(conj(transpose(H)) - H)) < 1e-12
+    H = Matrix{ComplexF64}(undef, size(opH))
+    mul!(H, opH, Matrix{ComplexF64}(I, size(opH)))
+    @assert maximum(abs.(conj(transpose(H)) - H)) < 1e-14
+    @assert maximum(abs.(imag(H))) < 1e-12
 
     λs, vs = compute_bands(pw, silicon, psp=psp, n_bands=5)
     for i in 1:length(ref)

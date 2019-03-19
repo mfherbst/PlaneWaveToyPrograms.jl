@@ -107,13 +107,13 @@ end
 
 
 """
-Evaluate a projector at a reciprocal point q. Compared to the rigorous
-derivation in doc.tex this expresison misses a factor i^l to avoid
-complex arithmetic. Compared to the ones presented
+Evaluate the radial part of a projector at a reciprocal point q.
+Compared to the rigorous derivation in doc.tex this expresison
+misses a factor i^l to avoid complex arithmetic. Compared to the ones presented
 in the GTH and HGH papers it misses a factor of 1/sqrt(Ω), which is added
 by the caller.
 """
-function eval_projection_vector(psp::PspHgh, i, l, qsq::Number)
+function eval_projection_radial(psp::PspHgh, i, l, qsq::Number)
     rp = psp.rp[l + 1]
     q = sqrt(qsq)
     qrsq = qsq * rp^2
