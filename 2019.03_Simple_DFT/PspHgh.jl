@@ -89,7 +89,13 @@ end
 # -------
 #
 
-function psp_loc(psp::PspHgh, ΔG)
+"""
+Evaluate the local part of the pseudopotential in reciprocal space
+taking a ΔG, a difference between plane waves as input. Effectively
+computes <e_G|Vloc|e_{G+ΔG}> without taking into account the
+structure factor and the (4π / Ω) spherical Hankel transform prefactor.
+"""
+function eval_psp_local_fourier(psp::PspHgh, ΔG)
     rloc = psp.rloc
     C(idx) = idx <= length(psp.c) ? psp.c[idx] : 0.0
     Grsq = sum(abs2, ΔG) * rloc^2
@@ -107,13 +113,29 @@ end
 
 
 """
+Evaluate the local part of the pseudopotential in real space taking
+a position vector r as input.
+"""
+function eval_psp_local_real(psp::PspHgh, r::Vector)
+    rloc = psp.rloc
+    C(idx) = idx <= length(psp.c) ? psp.c[idx] : 0.0
+    rrsq = sum(abs2, r) / rloc
+
+    (
+        - psp.Zion / norm(r) * erf(norm(r) / sqrt(2) / rloc)
+        + exp(-rrsq / 2) * ( C(1) + C(2) * rrsq + C(3) * rrsq^2 + C(4) * rrsq^3 )
+    )
+end
+
+
+"""
 Evaluate the radial part of a projector at a reciprocal point q.
 Compared to the rigorous derivation in doc.tex this expresison
 misses a factor i^l to avoid complex arithmetic. Compared to the ones presented
 in the GTH and HGH papers it misses a factor of 1/sqrt(Ω), which is added
 by the caller.
 """
-function eval_projection_radial(psp::PspHgh, i, l, qsq::Number)
+function eval_psp_projection_radial(psp::PspHgh, i, l, qsq::Number)
     rp = psp.rp[l + 1]
     q = sqrt(qsq)
     qrsq = qsq * rp^2
