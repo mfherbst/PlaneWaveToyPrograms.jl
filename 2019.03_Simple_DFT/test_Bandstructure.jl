@@ -152,7 +152,7 @@ function PspNonLocalBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System, p
                     # Compute projector for q and add it to proj_l
                     # including structure factor
                     q = pw.Gs[ig] + k
-                    radial_il = eval_projection_radial(psp, iproj, l, sum(abs2, q))
+                    radial_il = eval_psp_projection_radial(psp, iproj, l, sum(abs2, q))
                     proj_l[icont, iproj, l + m + 1] = radial_il * ylm_real(l, m, q)
                     # im^l *
                 end # ig
@@ -264,6 +264,28 @@ Base.size(H::HamiltonianBlock, idx::Int) = H.size[idx]
 Base.size(H::HamiltonianBlock) = H.size
 Base.eltype(H::HamiltonianBlock) = ComplexF64
 
+
+struct KineticPreconditionerBlock
+    # TODO Check what this guy is called in the literature normally
+    #      e.g. Kresse-Furtmüller paper
+    pw::PlaneWaveBasis
+    idx_kpoint::Int
+    qsq::Vector{Float64}
+    alpha::Float64
+    diagonal::Vector{Float64}
+end
+function KineticPreconditionerBlock(H::HamiltonianBlock; alpha=0)
+    qsq = H.T_k.qsq
+    diagonal = 1 ./ (qsq ./ 2 .+ 1e-6 .+ alpha)
+    KineticPreconditionerBlock(H.pw, H.idx_kpoint, qsq, alpha, diagonal)
+end
+function LinearAlgebra.ldiv!(Y, KinP::KineticPreconditionerBlock, B)
+    Y .= Diagonal(KinP.diagonal) * B
+end
+# function LinearAlgebra.ldiv!(KinP::KineticPreconditionerBlock, B)
+#     B ./= KinP.ksq
+# end
+
 #
 # ---------------------------------------------------------
 #
@@ -291,7 +313,9 @@ function compute_bands(pw::PlaneWaveBasis, system::System;
     for idx_kpoint in 1:n_k
         H = HamiltonianBlock(pw, idx_kpoint, system, psp=psp)
         largest = false  # Want smallest eigenpairs
-        res = lobpcg(H, largest, n_bands)
+        res = lobpcg(H, largest, n_bands, P=KineticPreconditionerBlock(H, alpha=0.1))
+
+        # precond
         # Preconditioner: P = (k^2 + α) where α is the average kinetic energy
         #                               of the bands of interest
         #
