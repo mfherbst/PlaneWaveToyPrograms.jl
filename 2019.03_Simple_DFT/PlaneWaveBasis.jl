@@ -44,7 +44,7 @@ struct PlaneWaveBasis
     FFT::typeof(plan_fft!(im * randn(2, 2, 2)))
 
     """Plan for inverse FFT"""
-    iFFT::typeof(plan_ifft(im * randn(2, 2, 2)))
+    iFFT::typeof(plan_ifft!(im * randn(2, 2, 2)))
 end
 
 
@@ -72,9 +72,9 @@ function PlaneWaveBasis(system::System, kpoints::Vector{Vector{Float64}}, Ecut;
         Gmash[ik] = findall(G -> sum(abs2, k + G) ≤ 2 * Ecut, Gs)
     end
 
-    # Maximal and minimal coordinates along each direction
-    max_coords = maximum(abs.(hcat(coords...)), dims=2)
-    min_coords = minimum(abs.(hcat(coords...)), dims=2)
+    # Minimal and maximal coordinates along each direction
+    min_coords = minimum(hcat(coords...), dims=2)
+    max_coords = maximum(hcat(coords...), dims=2)
 
     # Form and optimise FFT grid dimensions
     fft_size = reshape(max_coords .- min_coords .+ 1, :)
@@ -86,7 +86,7 @@ function PlaneWaveBasis(system::System, kpoints::Vector{Vector{Float64}}, Ecut;
 
     tmp = Array{ComplexF64}(undef, fft_size...)
     fft_plan = plan_fft!(tmp)  # can play with FFTW flags here
-    ifft_plan = plan_ifft(tmp) # can play with FFTW flags here
+    ifft_plan = plan_ifft!(tmp) # can play with FFTW flags here
 
     PlaneWaveBasis(kpoints, system.unit_cell_volume, Ecut, Gs,
                    idx_DC, Gmash, fft_supersampling, fft_size,
@@ -182,11 +182,11 @@ end
 #
 # Perform FFT
 #
-function G_to_R(pw::PlaneWaveBasis, F_fourier)
-    @assert length(F_fourier) == length(pw.Gs)
+function G_to_R(pw::PlaneWaveBasis, F_fourier; idx_to_fft=pw.idx_to_fft)
+    @assert length(F_fourier) == length(idx_to_fft)
     F_real = zeros(ComplexF64, pw.fft_size...)
-    for ig=1:length(pw.Gs)
-        F_real[pw.idx_to_fft[ig]...] = F_fourier[ig]
+    for (ig, idx_fft) in enumerate(idx_to_fft)
+        F_real[idx_fft...] = F_fourier[ig]
     end
     F_real = pw.iFFT * F_real  # Note: This destroys data in F_real
 
@@ -194,22 +194,20 @@ function G_to_R(pw::PlaneWaveBasis, F_fourier)
     # but the normalisation convention used in this code is
     # e_G(x) = e^iGx / sqrt(|Γ|), so we need to use the factor
     # below in order to match both conventions.
-    F_real .*= (length(F_real) / sqrt(pw.unit_cell_volume))
-    @assert norm(imag(F_real)) < 1e-10
-    real(F_real)
+    F_real .*= (prod(pw.fft_size) / sqrt(pw.unit_cell_volume))
 end
 
 
-function R_to_G(pw::PlaneWaveBasis, F_real)
+function R_to_G!(pw::PlaneWaveBasis, F_real; idx_to_fft=pw.idx_to_fft)
     @assert [size(F_real)...] == pw.fft_size
 
     # Do FFT on the full FFT plan, but only keep within
     # the n_G from the kinetic energy cutoff -> Lossy Compression of data
-    F_fourier_extended = pw.FFT * F_real
-    F_fourier = zeros(ComplexF64, length(pw.Gs))
-    for ig=1:length(F_fourier)
-        F_fourier[ig] = F_fourier_extended[pw.idx_to_fft[ig]...]
+    F_fourier_extended = pw.FFT * F_real  # This destroys data in F_real
+    F_fourier = zeros(ComplexF64, length(idx_to_fft))
+    for (ig, idx_fft) in enumerate(idx_to_fft)
+        F_fourier[ig] = F_fourier_extended[idx_fft...]
     end
     # Again adjust normalisation as in G_to_R
-    F_fourier .*= (sqrt(pw.unit_cell_volume) / length(F_real))
+    F_fourier .*= (sqrt(pw.unit_cell_volume) / prod(pw.fft_size))
 end
