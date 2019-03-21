@@ -38,75 +38,19 @@ end
 Base.size(Tk::KineticBlock) = (length(Tk.qsq), length(Tk.qsq))
 
 
-"""Nuclear attration potential matrix element <e_G|V|e_{G+ΔG}>"""
-function elem_nuclear_attration(ΔG, system::System)
-    if norm(ΔG) <= 1e-14  # Should take care of DC component
-        return 0.0
-    end
+function nuclear_attraction_generator_1e(system::System, G::Vector{Float64})
+    if sum(abs.(G)) == 0 return 0.0 end  # Ignore DC component (net zero charge)
     sum(
         -4π / system.unit_cell_volume   # spherical Hankel transform prefactor
-        * S.Zs[i] / sum(abs2, ΔG)       # potential
-        * cis(-dot(ΔG, R))              # structure factor
-        for (i, R) in enumerate(S.atoms)
+        * system.Zs[i] / sum(abs2, G)   # potential
+        * cis(-dot(G, R))               # structure factor
+        for (i, R) in enumerate(system.atoms)
     )
 end
 
 
-"""A k-Block of the nuclear attraction matrix"""
-struct NuclearAttractionBlock
-    pw::PlaneWaveBasis
-    idx_kpoint::Int
-    system::System
-    data::Array{ComplexF64,2}  # TODO temporary
-end
-function NuclearAttractionBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System)
-    n_G = length(pw.Gmask[idx_kpoint])
-    V = zeros(ComplexF64, n_G, n_G)
-    for (icont, ig) in enumerate(pw.Gmask[idx_kpoint]),
-            (jcont, jg) in enumerate(pw.Gmask[idx_kpoint])
-        ΔG = system.Gs[ig] - system.Gs[jg]
-        V[icont, jcont] = elem_nuclear_attration(ΔG, system)
-    end
-    NuclearAttractionBlock(pw, idx_kpoint, system, V)
-end
-LinearAlgebra.mul!(Y::SubArray, Vk::NuclearAttractionBlock, B::SubArray) = mul!(Y, Vk.data, B)
-
-
-"""A k-Block of the local part of the pseudopotential"""
-struct PspLocalBlock
-    pw::PlaneWaveBasis
-    idx_kpoint::Int
-    system::System
-    psp::PspHgh
-    data::Array{ComplexF64,2}  # TODO temporary
-end
-function PspLocalBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System, psp::PspHgh)
-    k = pw.kpoints[idx_kpoint]
-    n_G = length(pw.Gmask[idx_kpoint])
-    V = zeros(ComplexF64, n_G, n_G)
-
-    for (icont, ig) in enumerate(pw.Gmask[idx_kpoint]),
-            (jcont, jg) in enumerate(pw.Gmask[idx_kpoint])
-        if ig == jg
-            continue  # Ignore DC component (net zero charge)
-        end
-
-        ΔG = pw.Gs[ig] - pw.Gs[jg]
-        pot = eval_psp_local_fourier(psp, ΔG)
-
-        V[icont, jcont] = sum(
-            4π / system.unit_cell_volume   # Prefactor spherical Hankel transform
-            * pot * cis(-dot(ΔG, R))       # potential * structure factor
-            for R in system.atoms
-        )
-    end
-    PspLocalBlock(pw, idx_kpoint, system, psp, V)
-end
-LinearAlgebra.mul!(Y::SubArray, Vk::PspLocalBlock, B::SubArray) = mul!(Y, Vk.data, B)
-
 function psp_local_generator_1e(system::System, psp::PspHgh, G::Vector{Float64})
     if sum(abs.(G)) == 0 return 0.0 end  # Ignore DC component (net zero charge)
-
     pot = eval_psp_local_fourier(psp, G)
     sum(
         4π / system.unit_cell_volume  # Prefactor spherical Hankel transform
@@ -124,8 +68,6 @@ struct LocalPotentialBlock
     potential_1e_real::Array{Float64, 3}
 end
 function LocalPotentialBlock(pw::PlaneWaveBasis, idx_kpoint::Int, generator_1e)
-    k = pw.kpoints[idx_kpoint]
-
     # Fill 1e potential in Fourier space and transform to real space
     V1e = generator_1e.(pw.Gs)
     potential_1e_real = G_to_R(pw, V1e)
@@ -138,13 +80,11 @@ function LocalPotentialBlock(pw::PlaneWaveBasis, idx_kpoint::Int, generator_1e)
     @assert maximum(abs.(R_to_G!(pw, copy(potential_1e_real)) - V1e)) < 1e-12
 
     # Check the potential has no imaginary part
-    @assert norm(imag(potential_1e_real)) < 1e-13
+    @assert norm(imag(potential_1e_real)) < 1e-12
     potential_1e_real = real(potential_1e_real)
 
     # Prepare idx_to_fft for FFTs of the Psi
-    idx_to_fft = [pw.idx_to_fft[ig] for ig in pw.Gmask[idx_kpoint]]
-    # pw.idx_to_fft[pw.Gmask[idx_kpoint]]
-    # TODO could be an issue with the selection of translation indices here!
+    idx_to_fft = pw.idx_to_fft[pw.Gmask[idx_kpoint]]
     @assert length(idx_to_fft) == length(pw.Gmask[idx_kpoint])
 
     potential_real = potential_1e_real
@@ -265,28 +205,31 @@ function LinearAlgebra.mul!(Y::SubArray, Vk::PspNonLocalBlock, B::SubArray)
 end
 
 
-struct HamiltonianBlock{LocalPotential, NonLocalPotential}
+struct HamiltonianBlock{NonLocalPotential}
     pw::PlaneWaveBasis
     idx_kpoint::Int
     size::Tuple{Int,Int}
 
     T_k::KineticBlock
-    Vloc_k::LocalPotential
+    Vloc_k::LocalPotentialBlock
     Vnloc_k::NonLocalPotential
 end
 function HamiltonianBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System;
                           psp::PspHgh)
     T_k = KineticBlock(pw::PlaneWaveBasis, idx_kpoint::Int)
-    # Vloc_k = PspLocalBlock(pw, idx_kpoint, system, psp)
     Vloc_k = LocalPotentialBlock(pw, idx_kpoint,
                                  G -> psp_local_generator_1e(system, psp, G))
     Vnloc_k = PspNonLocalBlock(pw, idx_kpoint, system, psp)
     HamiltonianBlock(pw, idx_kpoint, size(T_k), T_k, Vloc_k, Vnloc_k)
 end
-function HamiltonianBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System)
+function HamiltonianBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System; psp::Nothing)
     T_k = KineticBlock(pw::PlaneWaveBasis, idx_kpoint::Int)
-    Vloc_k = NuclearAttractionBlock(pw, idx_kpoint, system)
-    HamiltonianBlock(pw, idx_kpoint, size(T_k), T_k, Vloc_k, nothing)
+    Vloc_k = LocalPotentialBlock(pw, idx_kpoint,
+                                 G -> nuclear_attraction_generator_1e(system, G))
+    HamiltonianBlock{Nothing}(pw, idx_kpoint, size(T_k), T_k, Vloc_k, nothing)
+end
+function HamiltonianBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System)
+    HamiltonianBlock(pw, idx_kpoint, system)
 end
 function LinearAlgebra.mul!(Y::Matrix, H::HamiltonianBlock, B::Matrix)
     mul!(view(Y,:,:), H, view(B, :, :))
@@ -294,19 +237,18 @@ end
 function LinearAlgebra.mul!(Y::Vector, H::HamiltonianBlock, B::Vector)
     mul!(view(Y,:,1), H, view(B, :, 1))
 end
-function LinearAlgebra.mul!(Y::SubArray, H::HamiltonianBlock{T, Nothing} where T,
+function LinearAlgebra.mul!(Y::SubArray, H::HamiltonianBlock{Nothing},
                             B::SubArray)
     mul!(Y, H.T_k, B)
-    Y2 = similar(Y)
+    Y2 = Array{ComplexF64}(undef, size(Y))
     mul!(view(Y2,:,:), H.Vloc_k, B)
     Y .+= Y2
 end
 function LinearAlgebra.mul!(Y::SubArray, H::HamiltonianBlock, B::SubArray)
     mul!(Y, H.T_k, B)
-    Y2 = Array{ComplexF64}( undef, size(Y))
+    Y2 = Array{ComplexF64}(undef, size(Y))
     mul!(view(Y2,:,:), H.Vloc_k, B)
     Y .+= Y2
-    Y2 = Array{ComplexF64}( undef, size(Y))
     mul!(view(Y2,:,:), H.Vnloc_k, B)
     Y .+= Y2
 end
@@ -340,9 +282,6 @@ end
 function LinearAlgebra.ldiv!(Y, KinP::KineticPreconditionerBlock, B)
     Y .= Diagonal(KinP.diagonal) * B
 end
-# function LinearAlgebra.ldiv!(KinP::KineticPreconditionerBlock, B)
-#     B ./= KinP.ksq
-# end
 
 #
 # ---------------------------------------------------------
