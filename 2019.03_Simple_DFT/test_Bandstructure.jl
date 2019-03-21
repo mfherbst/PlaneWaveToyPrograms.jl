@@ -72,23 +72,6 @@ end
 LinearAlgebra.mul!(Y::SubArray, Vk::NuclearAttractionBlock, B::SubArray) = mul!(Y, Vk.data, B)
 
 
-"""
-Local pseudopotential part matrix element <e_G|V|e_{G+ΔG}>
-"""
-function elem_psp_loc(ΔG, system::System, psp::PspHgh)
-    if norm(ΔG) <= 1e-14  # Should take care of DC component
-        return 0.0        # (net zero charge)
-    end
-
-    sum(
-        4π / system.unit_cell_volume    # spherical Hankel transform prefactor
-        * psp_loc(psp, ΔG)              # potential
-        * cis(-dot(ΔG, R))              # structure factor
-        for R in system.atoms
-    )
-end
-
-
 """A k-Block of the local part of the pseudopotential"""
 struct PspLocalBlock
     pw::PlaneWaveBasis
@@ -104,12 +87,78 @@ function PspLocalBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System, psp:
 
     for (icont, ig) in enumerate(pw.Gmask[idx_kpoint]),
             (jcont, jg) in enumerate(pw.Gmask[idx_kpoint])
+        if ig == jg
+            continue  # Ignore DC component (net zero charge)
+        end
+
         ΔG = pw.Gs[ig] - pw.Gs[jg]
-        V[icont, jcont] = elem_psp_loc(ΔG, system, psp)
+        pot = eval_psp_local_fourier(psp, ΔG)
+
+        V[icont, jcont] = sum(
+            4π / system.unit_cell_volume   # Prefactor spherical Hankel transform
+            * pot * cis(-dot(ΔG, R))       # potential * structure factor
+            for R in system.atoms
+        )
     end
     PspLocalBlock(pw, idx_kpoint, system, psp, V)
 end
 LinearAlgebra.mul!(Y::SubArray, Vk::PspLocalBlock, B::SubArray) = mul!(Y, Vk.data, B)
+
+function psp_local_generator_1e(system::System, psp::PspHgh, G::Vector{Float64})
+    if sum(abs.(G)) == 0 return 0.0 end  # Ignore DC component (net zero charge)
+
+    pot = eval_psp_local_fourier(psp, G)
+    sum(
+        4π / system.unit_cell_volume  # Prefactor spherical Hankel transform
+        * pot * cis(dot(G, R))        # potential and structure factor
+        for R in system.atoms
+    )
+end
+
+struct LocalPotentialBlock
+    pw::PlaneWaveBasis
+    idx_kpoint::Int
+    idx_to_fft::Vector{Vector{Int}}
+
+    potential_real::Array{Float64, 3}
+    potential_1e_real::Array{Float64, 3}
+end
+function LocalPotentialBlock(pw::PlaneWaveBasis, idx_kpoint::Int, generator_1e)
+    k = pw.kpoints[idx_kpoint]
+
+    # Fill 1e potential in Fourier space and transform to real space
+    V1e = generator_1e.(pw.Gs)
+    potential_1e_real = G_to_R(pw, V1e)
+
+    # Test FFT is an identity to the truncated potential in real space
+    @assert maximum(abs.(G_to_R(pw, R_to_G!(pw, copy(potential_1e_real)))
+                         - potential_1e_real)) < 1e-12
+
+    # Note: This fails for small grids with a low Ecut
+    @assert maximum(abs.(R_to_G!(pw, copy(potential_1e_real)) - V1e)) < 1e-12
+
+    # Check the potential has no imaginary part
+    @assert norm(imag(potential_1e_real)) < 1e-13
+    potential_1e_real = real(potential_1e_real)
+
+    # Prepare idx_to_fft for FFTs of the Psi
+    idx_to_fft = [pw.idx_to_fft[ig] for ig in pw.Gmask[idx_kpoint]]
+    # pw.idx_to_fft[pw.Gmask[idx_kpoint]]
+    # TODO could be an issue with the selection of translation indices here!
+    @assert length(idx_to_fft) == length(pw.Gmask[idx_kpoint])
+
+    potential_real = potential_1e_real
+    LocalPotentialBlock(pw, idx_kpoint, idx_to_fft, potential_real, potential_1e_real)
+end
+function LinearAlgebra.mul!(Y::SubArray, Vk::LocalPotentialBlock, B::SubArray)
+    n_G, n_vec = size(B)
+    for ivec in 1:n_vec
+        B_real = G_to_R(Vk.pw, B[:, ivec], idx_to_fft=Vk.idx_to_fft)
+        Y[:, ivec] = R_to_G!(Vk.pw, Vk.potential_real .* B_real,
+                             idx_to_fft=Vk.idx_to_fft)
+    end
+    Y
+end
 
 
 """A k-Block of the non-local part of the pseudopotential"""
@@ -228,9 +277,10 @@ end
 function HamiltonianBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System;
                           psp::PspHgh)
     T_k = KineticBlock(pw::PlaneWaveBasis, idx_kpoint::Int)
-    Vloc_k = PspLocalBlock(pw, idx_kpoint, system, psp)
+    # Vloc_k = PspLocalBlock(pw, idx_kpoint, system, psp)
+    Vloc_k = LocalPotentialBlock(pw, idx_kpoint,
+                                 G -> psp_local_generator_1e(system, psp, G))
     Vnloc_k = PspNonLocalBlock(pw, idx_kpoint, system, psp)
-    PspNonLocalBlock(pw, idx_kpoint, system, psp)
     HamiltonianBlock(pw, idx_kpoint, size(T_k), T_k, Vloc_k, Vnloc_k)
 end
 function HamiltonianBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System)
@@ -265,19 +315,27 @@ Base.size(H::HamiltonianBlock) = H.size
 Base.eltype(H::HamiltonianBlock) = ComplexF64
 
 
+"""
+Kinetic-enery based preconditioner.
+Applies 1 / (|k + G|^2 + α) to the vectors, when called with ldiv!
+
+The rationale is to dampen the high-kinetic energy parts of the
+Hamiltonian and decreases their size, thus make the Hamiltonian
+more well-conditioned
+"""
 struct KineticPreconditionerBlock
     # TODO Check what this guy is called in the literature normally
     #      e.g. Kresse-Furtmüller paper
     pw::PlaneWaveBasis
     idx_kpoint::Int
     qsq::Vector{Float64}
-    alpha::Float64
+    α::Float64
     diagonal::Vector{Float64}
 end
-function KineticPreconditionerBlock(H::HamiltonianBlock; alpha=0)
+function KineticPreconditionerBlock(H::HamiltonianBlock; α=0)
     qsq = H.T_k.qsq
-    diagonal = 1 ./ (qsq ./ 2 .+ 1e-6 .+ alpha)
-    KineticPreconditionerBlock(H.pw, H.idx_kpoint, qsq, alpha, diagonal)
+    diagonal = 1 ./ (qsq ./ 2 .+ 1e-6 .+ α)
+    KineticPreconditionerBlock(H.pw, H.idx_kpoint, qsq, α, diagonal)
 end
 function LinearAlgebra.ldiv!(Y, KinP::KineticPreconditionerBlock, B)
     Y .= Diagonal(KinP.diagonal) * B
@@ -313,15 +371,8 @@ function compute_bands(pw::PlaneWaveBasis, system::System;
     for idx_kpoint in 1:n_k
         H = HamiltonianBlock(pw, idx_kpoint, system, psp=psp)
         largest = false  # Want smallest eigenpairs
-        res = lobpcg(H, largest, n_bands, P=KineticPreconditionerBlock(H, alpha=0.1))
+        res = lobpcg(H, largest, n_bands, P=KineticPreconditionerBlock(H, α=0.1))
 
-        # precond
-        # Preconditioner: P = (k^2 + α) where α is the average kinetic energy
-        #                               of the bands of interest
-        #
-        #                               This mostly affects the high-kinetic energy parts
-        #                               of the Hamiltonian and decreases their size
-        #                               thus making the Hamiltonian more well-conditioned
         @assert maximum(imag(res.λ)) < 1e-12
         λs[idx_kpoint] = real(res.λ)
         vs[idx_kpoint] = res.X
@@ -404,6 +455,7 @@ function main()
 
     # Form new pw basis with the kpoints for above path
     pw = substitute_kpoints(pw, kpath.kpoints)
+    println("FFT grid size: $(prod(pw.fft_size))")
 
     # Compute bands and plot
     λs, vs = compute_bands(pw, silicon, psp=psp, n_bands=10)

@@ -194,7 +194,7 @@ function G_to_R(pw::PlaneWaveBasis, F_fourier; idx_to_fft=pw.idx_to_fft)
     # but the normalisation convention used in this code is
     # e_G(x) = e^iGx / sqrt(|Γ|), so we need to use the factor
     # below in order to match both conventions.
-    F_real .*= (prod(pw.fft_size) / sqrt(pw.unit_cell_volume))
+    F_real .*= prod(pw.fft_size)
 end
 
 
@@ -209,5 +209,5 @@ function R_to_G!(pw::PlaneWaveBasis, F_real; idx_to_fft=pw.idx_to_fft)
         F_fourier[ig] = F_fourier_extended[idx_fft...]
     end
     # Again adjust normalisation as in G_to_R
-    F_fourier .*= (sqrt(pw.unit_cell_volume) / prod(pw.fft_size))
+    F_fourier .*= 1 / prod(pw.fft_size)
 end
