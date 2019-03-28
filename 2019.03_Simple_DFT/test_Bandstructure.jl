@@ -357,8 +357,6 @@ function self_consistent_field!(H::Hamiltonian, bzmesh::BrilloinZoneMesh,
     else
         occs = occupation
     end
-    println("#################\n#-- SCF start --#\n#################")
-    println("occs: $occs")
 
     ene_old = NaN
     Psi = nothing
@@ -372,27 +370,33 @@ function self_consistent_field!(H::Hamiltonian, bzmesh::BrilloinZoneMesh,
     β_mix = 0.2
     ρ_old = H.ρ
     for i in 1:100
-        println("\n#\n# ITER $i\n#")
+        println("#\n# SCF iter $i\n#")
         make_precond(Hk) = KineticPreconditionerBlock(Hk, α=0.1)
         largest = false
         res = lobpcg_full(H, largest, n_bands, tol=tol / 100,
                           guess=Psi, preconditioner=make_precond)
         Psi = [st.X for st in res]
-        println("\nEvals:")
+        println("\nlobpcg evals:")
         for (i, st) in enumerate(res)
             println("$i  $(real(st.λ))")
         end
 
         ρ = compute_density_stupid(H.pw, bzmesh, Psi, occs)
-
         H = substitute_density!(H, ρ)
         ene = compute_energy(H, bzmesh, Psi, occupation)
-        println("energy: kin=$(ene["kinetic"])  e2e=$(ene["e2e"])  " *
-                "e1e_loc=$(ene["e1e_loc"])  e_nloc=$(ene["e_nloc"])")
+
+        # Display convergence
         diff = ene["total"] - ene_old
-        println("iter: $i   E=$(ene["total"])   ΔE=$diff")
+        println()
+        for key in keys(ene)
+            if key != "total"
+                @printf("%8s =  %16.10g\n", key, ene[key])
+            end
+        end
+        @printf("%8s =  %16.10g\n", "total", ene["total"])
+        @printf("%8s =  %16.10g\n", "Δtotal", diff)
         if abs(diff) < tol
-            println("converged")
+            println("\n#\n#-- SCF converged\n#")
             return H, ene
         end
 
@@ -403,8 +407,10 @@ function self_consistent_field!(H::Hamiltonian, bzmesh::BrilloinZoneMesh,
 
         ene_old = ene["total"]
         ρ_old = ρ
+
+        println()
     end
-    return H, Dict(String, Float64)("total"=>ene_old)
+    return H, Dict(String, Float64)("total" => ene_old)
 end
 
 
@@ -452,16 +458,10 @@ function compute_energy(H::Hamiltonian, bzmesh::BrilloinZoneMesh,
 end
 
 function purify_print(Mat; tol=1e-14)
-    for ij in CartesianIndices(Mat)
-        if abs(Mat[ij]) < 1e-14
-            Mat[ij] = 0
-        end
-    end
-
     str = ""
     for i in 1:size(Mat, 1)
         for j in 1:size(Mat, 2)
-            if Mat[i,j] < tol
+            if abs(Mat[i,j]) < tol
                 str *= @sprintf "%8.4g " 0
             else
                 str *= @sprintf "%8.4g " Mat[i,j]
@@ -482,65 +482,44 @@ function compute_density_stupid(pw::PlaneWaveBasis, bzmesh::BrilloinZoneMesh,
         @assert length(occupation) == size(Psi[idx_kpoint], 2)
     end
 
-    println("\n# density computation")
-    ρ = zeros(Float64, pw.fft_size...)
+    ρ = zeros(ComplexF64, pw.fft_size...)
     for idx_kpoint in 1:n_k
-        println("-- idx_kpoint=$idx_kpoint")
         Ψ_k = Psi[idx_kpoint]
         idx_fft = pw.idx_to_fft[pw.Gmask[idx_kpoint]]
         weight = bzmesh.weights[idx_kpoint]
         n_states = size(Ψ_k, 2)
 
         # Fourier-transform the wave functions to real space
-        Ψ_k_real = Array{ComplexF64}( undef, pw.fft_size..., n_states)
+        Ψ_k_real = zeros(ComplexF64, pw.fft_size..., n_states)
         for istate in 1:n_states
             Ψ_k_real[:, :, :, istate] = G_to_R(pw, Ψ_k[:, istate]; idx_to_fft=idx_fft)
         end
 
-        # Orthonormalise in real space
-        # TODO Why is this needed ?
-        Ψ_k_real_mat = reshape(Ψ_k_real, n_fft, n_states)
-        Udagger = (
-              sqrt(n_fft / pw.unit_cell_volume)
-            * inv(sqrt(adjoint(Ψ_k_real_mat) * Ψ_k_real_mat))
-        )
-        println("Udagger: \n$(purify_print(real(Udagger)))\n----")
-        Ψ_k_real_mat = Ψ_k_real_mat * Udagger
+        # TODO I am not quite sure why this is needed here
+        #      maybe this points at an error in the normalisation of the
+        #      Fourier transform
+        Ψ_k_real /= sqrt(pw.unit_cell_volume)
 
-        # Assert orthonormality of orbitals at k-point
-        println("non-orthonormality: ",
-                maximum(abs.(adjoint(Ψ_k_real_mat) * Ψ_k_real_mat  - (n_fft / pw.unit_cell_volume) * I)))
-        @assert maximum(abs.(adjoint(Ψ_k_real_mat) * Ψ_k_real_mat
-                             - (n_fft / pw.unit_cell_volume) * I)) < 1e-10
-        Ψ_k_real = reshape(Ψ_k_real_mat, pw.fft_size..., n_states)
+        # Check for orthonormality of the Ψ_k_reals
+        Ψ_k_real_mat = reshape(Ψ_k_real, n_fft, n_states)
+        Ψ_k_real_overlap = adjoint(Ψ_k_real_mat) * Ψ_k_real_mat
+        @assert maximum(abs.(Ψ_k_real_overlap - I * (n_fft / pw.unit_cell_volume))) < 1e-10
 
         # Add the density from this kpoint
         for istate in 1:n_states
-            # TODO Assert imaginary part is not too large!
             ρ .+= (weight * occupation[istate]
-                   * real(Ψ_k_real[:, :, :, istate] .* conj(Ψ_k_real[:, :, :, istate]))
+                   * Ψ_k_real[:, :, :, istate] .* conj(Ψ_k_real[:, :, :, istate])
             )
         end
     end
 
+    # Check ρ is real and positive and properly normalised
     @assert maximum(imag(ρ)) < 1e-12
     ρ = real(ρ)
+    @assert minimum(ρ) ≥ 0
 
-    # Ensure that there is no negative ρ element
-    # TODO Why is this needed?
-    for ijk in CartesianIndices(ρ)
-        ρ[ijk] = max(ρ[ijk], 0)
-    end
-
-
-    # Renormalize rho
-    # TODO Why is this needed?
-    n_electrons_integrated = sum(ρ) * pw.unit_cell_volume / prod(pw.fft_size)
-    println("n_electrons_integrated:  $(n_electrons_integrated)")
-    #@assert abs(n_electrons_integrated - sum(occupation)) < 1e-12
-    ρ = sum(occupation) / n_electrons_integrated * ρ
-
-    println("# end density computation\n")
+    n_electrons = sum(ρ) * pw.unit_cell_volume / n_fft
+    @assert abs(n_electrons - sum(occupation)) < 1e-9
 
     ρ
 end
@@ -671,15 +650,15 @@ function quicktest_silicon()
     ref = ref_noXC
     for i in 1:length(ref)
         println(λs[i] - ref[i])
-        @assert maximum(abs.(ref[i] - λs[i])[1:4]) < 1e-4
+        @assert maximum(abs.(ref[i] - λs[i])[1:4]) < 5e-5
         @assert maximum(abs.(ref[i] - λs[i])) < 1e-3
     end
 
-    @assert abs(ene["total"]   -  3.1661644264) < 1e-5
     @assert abs(ene["e1e_loc"] - -1.7783908803) < 1e-4
     @assert abs(ene["kinetic"] -  3.0074897969) < 1e-4
     @assert abs(ene["e_nloc"]  -  1.5085540922) < 1e-4
     @assert abs(ene["e2e"]     -  0.4285114176) < 1e-4
+    @assert abs(ene["total"]   -  3.1661644264) < 1e-6
 end
 
 
