@@ -44,6 +44,19 @@ function build_diamond_bzmesh(system::System)
         [ -0.0000000000,  0.0000000000,  0.6666666667],
         [  0.6666666667, -0.6666666667, -0.0000000000],
     ]
+    kpoints = [system.B * k for k in kpoints]
+
+    # TODO Big hack for exactly silicon
+    silicon = build_diamond_system(5.431020504 * ÅtoBohr, 14)
+    if system.Zs != silicon.Zs || system.A != silicon.A
+        throw(ErrorException("Silicon is hard-coded"))
+    end
+    kpoints = [
+        [  0.0000000000,  0.0000000000,  0.0000000000],
+        [ -0.2040695957,  0.2040695957,  0.2040695957],
+        [ -0.0000000000,  0.0000000000,  0.4081391913],
+        [  0.4081391913, -0.4081391913, -0.0000000000],
+    ]
     weights = [0.0370370370, 0.2962962963, 0.2222222222, 0.4444444444]
     arclength = norm.(diff(kpoints))
     BrilloinZoneMesh(system, mesh, kpoints, weights, arclength)
