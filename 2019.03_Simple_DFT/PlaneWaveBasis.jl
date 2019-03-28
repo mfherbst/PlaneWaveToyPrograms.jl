@@ -49,7 +49,7 @@ end
 
 
 function PlaneWaveBasis(system::System, kpoints::Vector{Vector{Float64}}, Ecut;
-                        fft_supersampling=2)
+                        fft_supersampling=2, Gs=nothing)
     # We want the set of wavevectors {G} to be chosen such that |G|^2/2 ≤ Ecut,
     # i.e. |G| ≤ 2 * sqrt(Ecut). Additionally the representation of the electron
     # density and the exchange-correlation term needs more wavevectors
@@ -59,7 +59,12 @@ function PlaneWaveBasis(system::System, kpoints::Vector{Vector{Float64}}, Ecut;
     cutoff_Gsq = 2 * fft_supersampling^2 * Ecut
 
     # Construct the plane-wave grid
-    coords, Gs = construct_pw_grid(system, cutoff_Gsq, kpoints=kpoints)
+    if Gs == nothing
+        coords, Gs = construct_pw_grid(system, cutoff_Gsq, kpoints=kpoints)
+    else
+        Bfac = factorize(system.B)
+        coords = [round.(Int, Bfac \ G) for G in Gs]
+    end
 
     # Index of the DC component inside Gs
     idx_DC = findfirst(isequal([0, 0, 0]), coords)
