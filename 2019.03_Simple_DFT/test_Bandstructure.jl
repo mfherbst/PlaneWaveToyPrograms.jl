@@ -1,4 +1,6 @@
 using FFTW
+using LinearAlgebra
+using Printf
 include("SphericalHarmonics.jl")
 include("System.jl")
 include("BrilloinZonePath.jl")
@@ -6,8 +8,8 @@ include("BrilloinZoneMesh.jl")
 include("PlaneWaveBasis.jl")
 include("Units.jl")
 include("PspHgh.jl")
-using Printf
-using LinearAlgebra
+include("libxc.jl")
+include("blocks.jl")
 using PyPlot
 using ProgressMeter
 using IterativeSolvers
@@ -16,282 +18,30 @@ import IterativeSolvers: LOBPCGResults
 # TODO qsq should only be computed once for each k
 
 #
-# Terms
+# Hamiltonian
 #
-"""A k-Block of the kinetic matrix"""
-struct KineticBlock
-    pw::PlaneWaveBasis
-    idx_kpoint::Int
+Wavefunction = Vector{Matrix{ComplexF64}}
+FunctionalXC = Vector{Functional}
 
-    """Cache for the terms |G + k|^2; size: n_G"""
-    qsq::Vector{Float64}
-end
-function KineticBlock(pw::PlaneWaveBasis, idx_kpoint::Int)
-    n_G = length(pw.Gmask[idx_kpoint])
-    qsq = Vector{Float64}(undef, n_G)
-    for (icont, ig) in enumerate(pw.Gmask[idx_kpoint])
-        qsq[icont] = sum(abs2, pw.Gs[ig] + pw.kpoints[idx_kpoint])
-    end
-    KineticBlock(pw, idx_kpoint, qsq)
-end
-function LinearAlgebra.mul!(Y::SubArray, Tk::KineticBlock, B::SubArray)
-    Y .= Diagonal(Tk.qsq / 2) * B
-end
-Base.size(Tk::KineticBlock) = (length(Tk.qsq), length(Tk.qsq))
-import Base: *
-function *(Tk::KineticBlock, B::Array)
-    Y = similar(B)
-    mul!(view(Y,:,:), Tk, view(B,:,:))
-end
-
-
-function nuclear_attraction_generator_1e(system::System, G::Vector{Float64})
-    if sum(abs.(G)) == 0 return 0.0 end  # Ignore DC component (net zero charge)
-    sum(
-        -4π / system.unit_cell_volume   # spherical Hankel transform prefactor
-        * system.Zs[i] / sum(abs2, G)   # potential
-        * cis(-dot(G, R))               # structure factor
-        for (i, R) in enumerate(system.atoms)
-    )
-end
-
-
-function psp_local_generator_1e(system::System, psp::PspHgh, G::Vector{Float64})
-    if sum(abs.(G)) == 0 return 0.0 end  # Ignore DC component (net zero charge)
-    pot = eval_psp_local_fourier(psp, G)
-    sum(
-        4π / system.unit_cell_volume  # Prefactor spherical Hankel transform
-        * pot * cis(dot(G, R))        # potential and structure factor
-        for R in system.atoms
-    )
-end
-
-struct LocalPotentialBlock
-    pw::PlaneWaveBasis
-    idx_kpoint::Int
-    idx_to_fft::Vector{Vector{Int}}
-
-    potential_1e_real::Array{Float64, 3}
-    potential_2e_real::Array{Float64, 3}
-end
-function LocalPotentialBlock(pw::PlaneWaveBasis, idx_kpoint::Int, generator_1e,
-                             potential_2e_real::Array{ComplexF64, 3})
-    # Fill 1e potential in Fourier space and transform to real space
-    V1e = generator_1e.(pw.Gs)
-    potential_1e_real = G_to_R(pw, V1e)
-
-    # Test FFT is an identity to the truncated potential in real space
-    @assert maximum(abs.(G_to_R(pw, R_to_G!(pw, copy(potential_1e_real)))
-                         - potential_1e_real)) < 1e-12
-
-    # Note: This fails for small grids with a low Ecut
-    @assert maximum(abs.(R_to_G!(pw, copy(potential_1e_real)) - V1e)) < 1e-12
-
-    # Check the potential has no imaginary part
-    @assert norm(imag(potential_1e_real)) < 1e-12
-    potential_1e_real = real(potential_1e_real)
-
-    # Prepare idx_to_fft for FFTs of the Psi
-    idx_to_fft = pw.idx_to_fft[pw.Gmask[idx_kpoint]]
-    @assert length(idx_to_fft) == length(pw.Gmask[idx_kpoint])
-
-    @assert norm(imag(potential_2e_real)) < 1e-12
-    potential_2e_real = real(potential_2e_real)
-    LocalPotentialBlock(pw, idx_kpoint, idx_to_fft, potential_1e_real,
-                        potential_2e_real)
-end
-function LinearAlgebra.mul!(Y::SubArray, Vk::LocalPotentialBlock, B::SubArray)
-    n_G, n_vec = size(B)
-    for ivec in 1:n_vec
-        B_real = G_to_R(Vk.pw, B[:, ivec], idx_to_fft=Vk.idx_to_fft)
-        VkB_real = (Vk.potential_1e_real .+ Vk.potential_2e_real) .* B_real
-        Y[:, ivec] = R_to_G!(Vk.pw, VkB_real, idx_to_fft=Vk.idx_to_fft)
-    end
-    Y
-end
-
-
-"""A k-Block of the non-local part of the pseudopotential"""
-struct PspNonLocalBlock
-    pw::PlaneWaveBasis
-    idx_kpoint::Int
-
-    """
-    Cache for the projection vectors. For each l the Vector
-    contains an array of size (n_G, n_proj, 2*lmax+1),
-    where n_proj are the number of projectors for this l.
-
-    These quantities are called ̂p_i^{l,m} in doc.tex. Note,
-    that compared to doc.tex these quantities miss the factor
-    i^l to stay in real arithmetic for them.
-    """
-    projection_vectors::Vector{Array{Float64, 3}}
-
-    """The coefficients to employ between projection vectors"""
-    projection_coefficients::Vector{Matrix{Float64}}
-
-    """
-    Cache for the structure factor
-    """
-    structure_factor::Matrix{ComplexF64}
-end
-function PspNonLocalBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System, psp::PspHgh)
-    k = pw.kpoints[idx_kpoint]
-    n_G = length(pw.Gmask[idx_kpoint])
-    n_atoms = length(system.atoms)
-
-    # Evaluate projection vectors
-    projection_vectors = Vector{Array{Float64, 3}}(undef, psp.lmax + 1)
-    for l in 0:psp.lmax
-        n_proj = size(psp.h[l + 1], 1)
-        proj_l = zeros(Float64, n_G, n_proj, 2l + 1)
-        for m in -l:l
-            for iproj in 1:n_proj
-                for (icont, ig) in enumerate(pw.Gmask[idx_kpoint])
-                    # Compute projector for q and add it to proj_l
-                    # including structure factor
-                    q = pw.Gs[ig] + k
-                    radial_il = eval_psp_projection_radial(psp, iproj, l, sum(abs2, q))
-                    proj_l[icont, iproj, l + m + 1] = radial_il * ylm_real(l, m, q)
-                    # im^l *
-                end # ig
-            end  # iproj
-        end  # m
-        projection_vectors[l + 1] = proj_l
-    end  # l
-
-    structure_factor = Matrix{ComplexF64}(undef, n_G, length(system.atoms))
-    for (iatom, R) in enumerate(system.atoms)
-        for (icont, ig) in enumerate(pw.Gmask[idx_kpoint])
-            structure_factor[icont, iatom] = cis(dot(R, pw.Gs[ig]))
-        end
-    end
-
-    projection_coefficients = psp.h
-    PspNonLocalBlock(pw, idx_kpoint, projection_vectors, projection_coefficients,
-                     structure_factor)
-end
-function LinearAlgebra.mul!(Y::SubArray, Vk::PspNonLocalBlock, B::SubArray)
-    n_G, n_vec = size(B)
-    n_atoms = size(Vk.structure_factor, 2)
-    lmax = length(Vk.projection_vectors) - 1
-
-    # TODO Maybe precompute this?
-    # Amend projection vector by structure factor
-    projsf = [
-        broadcast(*, reshape(Vk.projection_vectors[l + 1], n_G, :, 2l+1, 1),
-                  reshape(Vk.structure_factor, n_G, 1, 1, n_atoms))
-        for l in 0:lmax
-    ]
-
-    # Compute product of transposed projection operator
-    # times B for each angular momentum l
-    projtB = Vector{Array{ComplexF64, 4}}(undef, lmax + 1)
-    for l in 0:lmax
-        n_proj = size(Vk.projection_vectors[l + 1], 2)
-        projsf_l = projsf[l + 1]
-        @assert size(projsf_l) == (n_G, n_proj, 2l + 1, n_atoms)
-
-        # TODO use dot
-        # Perform application of projector times B as matrix-matrix product
-        projtB_l = adjoint(reshape(projsf_l, n_G, :)) *  B
-        @assert size(projtB_l) ==  (n_proj * (2l + 1) * n_atoms, n_vec)
-
-        projtB[l + 1] = reshape(projtB_l, n_proj, 2l + 1, n_atoms, n_vec)
-    end
-
-    # Compute contraction of above result with coefficients h
-    # and another projector
-    Ω = Vk.pw.unit_cell_volume
-    Y[:] = zeros(ComplexF64, n_G, n_vec)
-    for l in 0:lmax, midx in 1:2l + 1, iatom in 1:n_atoms
-        h_l = Vk.projection_coefficients[l + 1]
-        projsf_l = projsf[l + 1]
-        projtB_l = projtB[l + 1]
-        Y .+= projsf_l[:, :, midx, iatom] * (h_l * projtB_l[:, midx, iatom, :] / Ω)
-    end
-
-    Y
-end
-import Base: *
-function *(Vk::PspNonLocalBlock, B::Array)
-    Y = similar(B)
-    mul!(view(Y,:,:), Vk, view(B,:,:))
-end
-
-
-struct HamiltonianBlock{NonLocalPotential}
-    pw::PlaneWaveBasis
-    idx_kpoint::Int
-    size::Tuple{Int,Int}
-
-    T_k::KineticBlock
-    Vloc_k::LocalPotentialBlock
-    Vnloc_k::NonLocalPotential
-end
-function HamiltonianBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System,
-                          psp::PspHgh)
-    HamiltonianBlock(pw, idx_kpoint, system, psp, zeros(ComplexF64, pw.fft_size...))
-end
-function HamiltonianBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System,
-                          psp::PspHgh, potential_2e_real::Array{ComplexF64, 3})
-    T_k = KineticBlock(pw::PlaneWaveBasis, idx_kpoint::Int)
-    Vloc_k = LocalPotentialBlock(pw, idx_kpoint,
-                                 G -> psp_local_generator_1e(system, psp, G),
-                                 potential_2e_real)
-    Vnloc_k = PspNonLocalBlock(pw, idx_kpoint, system, psp)
-    HamiltonianBlock{PspNonLocalBlock}(pw, idx_kpoint, size(T_k), T_k, Vloc_k, Vnloc_k)
-end
-function HamiltonianBlock(pw::PlaneWaveBasis, idx_kpoint::Int, system::System, psp::Nothing)
-    T_k = KineticBlock(pw::PlaneWaveBasis, idx_kpoint::Int)
-    Vloc_k = LocalPotentialBlock(pw, idx_kpoint,
-                                 G -> nuclear_attraction_generator_1e(system, G))
-    HamiltonianBlock{Nothing}(pw, idx_kpoint, size(T_k), T_k, Vloc_k, nothing)
-end
-function LinearAlgebra.mul!(Y::Matrix, H::HamiltonianBlock, B::Matrix)
-    mul!(view(Y,:,:), H, view(B, :, :))
-end
-function LinearAlgebra.mul!(Y::Vector, H::HamiltonianBlock, B::Vector)
-    mul!(view(Y,:,1), H, view(B, :, 1))
-end
-function LinearAlgebra.mul!(Y::SubArray, H::HamiltonianBlock{Nothing},
-                            B::SubArray)
-    mul!(Y, H.T_k, B)
-    Y2 = Array{ComplexF64}(undef, size(Y))
-    mul!(view(Y2,:,:), H.Vloc_k, B)
-    Y .+= Y2
-end
-function LinearAlgebra.mul!(Y::SubArray, H::HamiltonianBlock, B::SubArray)
-    mul!(Y, H.T_k, B)
-    Y2 = Array{ComplexF64}(undef, size(Y))
-    mul!(view(Y2,:,:), H.Vloc_k, B)
-    Y .+= Y2
-    mul!(view(Y2,:,:), H.Vnloc_k, B)
-    Y .+= Y2
-end
-import Base: *
-function *(H::HamiltonianBlock, B::Array)
-    Y = similar(B)
-    mul!(Y, H, B)
-end
-Base.size(H::HamiltonianBlock, idx::Int) = H.size[idx]
-Base.size(H::HamiltonianBlock) = H.size
-Base.eltype(H::HamiltonianBlock) = ComplexF64
 
 struct Hamiltonian{NonLocalPotential}
     pw::PlaneWaveBasis
     blocks::Vector{HamiltonianBlock{NonLocalPotential}}
     ρ::Array{Float64, 3}
+    xc::FunctionalXC
     potential_2e_real::Array{ComplexF64, 3}
 end
+
+
 function Hamiltonian(pw::PlaneWaveBasis, system::System,
-                     psp::Union{PspHgh, Nothing};
+                     psp::Union{PspHgh, Nothing},
+                     xc::FunctionalXC;
                      ρguess::Union{Array{Float64, 3}, Nothing}=nothing)
     potential_2e_real = zeros(ComplexF64, pw.fft_size...)
     if ρguess == nothing
         ρguess = zeros(Float64, pw.fft_size...)
     else
-        potential_2e_real = solve_poisson(pw::PlaneWaveBasis, ρguess)
+        potential_2e_real = solve_poisson(pw, ρguess) + compute_xc(xc, ρguess)
         println("norm(imag(potential_2e_real)) == $(norm(imag(potential_2e_real)))")
         @assert norm(imag(potential_2e_real)) < 1e-12
     end
@@ -299,20 +49,38 @@ function Hamiltonian(pw::PlaneWaveBasis, system::System,
     blocks = [HamiltonianBlock(pw, idx_kpoint, system, psp, potential_2e_real)
               for idx_kpoint in 1:length(pw.kpoints)]
     if psp == nothing
-        Hamiltonian{Nothing}(pw, blocks, ρguess, potential_2e_real)
+        Hamiltonian{Nothing}(pw, blocks, ρguess, xc, potential_2e_real)
     else
-        Hamiltonian{PspNonLocalBlock}(pw, blocks, ρguess, potential_2e_real)
+        Hamiltonian{PspNonLocalBlock}(pw, blocks, ρguess, xc, potential_2e_real)
     end
 end
+
+
 function solve_poisson(pw::PlaneWaveBasis, ρ::Array{Float64, 3})
     ρ_Fourier = R_to_G!(pw, copy(ρ))
     VHartree_Fourier = 4π*[ρ_Fourier[ig] / sum(abs2, G) for (ig, G) in enumerate(pw.Gs)]
     VHartree_Fourier[pw.idx_DC] = 0.0
     G_to_R(pw, VHartree_Fourier)
 end
+
+
+function compute_xc(xc::FunctionalXC, ρ::Array{Float64, 3})
+    accu = zeros(Float64, size(ρ)...)
+    for i in 1:length(xc)
+        # TODO Better to use functional kind from libxc for this
+        if startswith(xc[i].name, "lda")
+            accu += evaluate_lda(xc[i], ρ, derivatives=[1])[1]
+        else
+            error("Not implemented.")
+        end
+    end
+    accu
+end
+
+
 function substitute_density!(H::Hamiltonian, ρ::Array{Float64, 3})
     H.ρ[:] = ρ
-    H.potential_2e_real[:] = solve_poisson(H.pw, ρ)
+    H.potential_2e_real[:] = solve_poisson(H.pw, ρ) + compute_xc(H.xc, ρ)
     @assert norm(imag(H.potential_2e_real)) < 1e-12
     for b in H.blocks
         b.Vloc_k.potential_2e_real[:] = real(H.potential_2e_real[:])
@@ -320,6 +88,44 @@ function substitute_density!(H::Hamiltonian, ρ::Array{Float64, 3})
     H
 end
 
+
+#
+# LOBPCG preconditioner
+#
+"""
+Kinetic-energy based preconditioner.
+Applies 1 / (|k + G|^2 + α) to the vectors, when called with ldiv!
+
+The rationale is to dampen the high-kinetic energy parts of the
+Hamiltonian and decreases their size, thus make the Hamiltonian
+more well-conditioned
+"""
+struct KineticPreconditionerBlock
+    # TODO Check what this guy is called in the literature normally
+    #      e.g. Kresse-Furtmüller paper
+    pw::PlaneWaveBasis
+    idx_kpoint::Int
+    qsq::Vector{Float64}
+    α::Float64
+    diagonal::Vector{Float64}
+end
+
+
+function KineticPreconditionerBlock(H::HamiltonianBlock; α=0)
+    qsq = H.T_k.qsq
+    diagonal = 1 ./ (qsq ./ 2 .+ 1e-6 .+ α)
+    KineticPreconditionerBlock(H.pw, H.idx_kpoint, qsq, α, diagonal)
+end
+
+
+function LinearAlgebra.ldiv!(Y, KinP::KineticPreconditionerBlock, B)
+    Y .= Diagonal(KinP.diagonal) * B
+end
+
+
+#
+# SCF
+#
 function lobpcg_full(H::Hamiltonian, largest::Bool, n_bands::Int;
                 preconditioner=nothing, guess=nothing, kwargs...)
     n_k = length(H.blocks)
@@ -344,133 +150,6 @@ function lobpcg_full(H::Hamiltonian, largest::Bool, n_bands::Int;
     res
 end
 
-
-function self_consistent_field!(H::Hamiltonian, bzmesh::BrilloinZoneMesh,
-                                occupation::Vector{Float64};
-                                n_bands::Int=sum(occupation .> 0),
-                                PsiGuess=nothing, tol=1e-6)
-    @assert n_bands ≥ length(occupation)
-
-    if n_bands > length(occupation)
-        occs = zeros(Float64, n_bands)
-        occs[1:length(occupation)] = occupation
-    else
-        occs = occupation
-    end
-
-    ene_old = NaN
-    Psi = nothing
-    if PsiGuess != nothing
-        Psi = PsiGuess
-        @assert size(PsiGuess[1], 2) == n_bands
-        ene_old = compute_energy(H, bzmesh, Psi, occs)["total"]
-        println("Starting ene:       $(ene_old)")
-    end
-
-    β_mix = 0.2
-    ρ_old = H.ρ
-    for i in 1:100
-        println("#\n# SCF iter $i\n#")
-        make_precond(Hk) = KineticPreconditionerBlock(Hk, α=0.1)
-        largest = false
-        res = lobpcg_full(H, largest, n_bands, tol=tol / 100,
-                          guess=Psi, preconditioner=make_precond)
-        Psi = [st.X for st in res]
-        println("\nlobpcg evals:")
-        for (i, st) in enumerate(res)
-            println("$i  $(real(st.λ))")
-        end
-
-        ρ = compute_density_stupid(H.pw, bzmesh, Psi, occs)
-        H = substitute_density!(H, ρ)
-        ene = compute_energy(H, bzmesh, Psi, occupation)
-
-        # Display convergence
-        diff = ene["total"] - ene_old
-        println()
-        for key in keys(ene)
-            if key != "total"
-                @printf("%8s =  %16.10g\n", key, ene[key])
-            end
-        end
-        @printf("%8s =  %16.10g\n", "total", ene["total"])
-        @printf("%8s =  %16.10g\n", "Δtotal", diff)
-        if abs(diff) < tol
-            println("\n#\n#-- SCF converged\n#")
-            return H, ene
-        end
-
-        if norm(ρ_old) > 0
-            ρ = β_mix * H.ρ + (1 - β_mix) * ρ_old
-            H = substitute_density!(H, ρ)
-        end
-
-        ene_old = ene["total"]
-        ρ_old = ρ
-
-        println()
-    end
-    return H, Dict(String, Float64)("total" => ene_old)
-end
-
-
-Wavefunction = Vector{Matrix{ComplexF64}}
-function compute_energy(H::Hamiltonian, bzmesh::BrilloinZoneMesh,
-                        Psi::Wavefunction, occupation::Vector{Float64})
-    @assert real(H.potential_2e_real) == H.blocks[1].Vloc_k.potential_2e_real
-    @assert H.pw.kpoints == bzmesh.kpoints
-
-    dVol = H.pw.unit_cell_volume / prod(H.pw.fft_size)
-    e2e = 0.5 * sum(H.blocks[1].Vloc_k.potential_2e_real .* H.ρ) * dVol
-    e1e_loc = sum(H.blocks[1].Vloc_k.potential_1e_real .* H.ρ) * dVol
-
-    e_kin = 0.0
-    for ik in 1:length(bzmesh.kpoints)
-        Psi_k = Psi[ik]
-        w_k = bzmesh.weights[ik]
-        e_kin += w_k * occupation[ik] * tr(adjoint(Psi_k) * (H.blocks[ik].T_k * Psi_k))
-    end
-
-    e_nloc = 0.0
-    if H.blocks[1].Vnloc_k != nothing
-        # TODO One could be more clever about this and directly
-        #      use the projections
-        for ik in 1:length(bzmesh.kpoints)
-            Psi_k = Psi[ik]
-            w_k = bzmesh.weights[ik]
-            e_nloc += (
-                w_k * occupation[ik] * tr(adjoint(Psi_k) * (H.blocks[ik].Vnloc_k * Psi_k))
-            )
-        end
-    end
-
-    # TODO Nuclear repulsion and psp core energy
-
-    total = e_kin + e2e + e1e_loc + e_nloc
-    @assert imag(total) < 1e-12
-    Dict{String, Float64}(
-        "kinetic" => real(e_kin),
-        "e2e"     => real(e2e),
-        "e1e_loc" => real(e1e_loc),
-        "e_nloc"  => real(e_nloc),
-        "total"   => real(total)
-    )
-end
-
-function purify_print(Mat; tol=1e-14)
-    str = ""
-    for i in 1:size(Mat, 1)
-        for j in 1:size(Mat, 2)
-            if abs(Mat[i,j]) < tol
-                str *= @sprintf "%8.4g " 0
-            else
-                str *= @sprintf "%8.4g " Mat[i,j]
-            end
-        end
-        str *= "\n"
-    end
-    str
-end
 
 function compute_density_stupid(pw::PlaneWaveBasis, bzmesh::BrilloinZoneMesh,
                                 Psi::Wavefunction, occupation::Vector{Float64})
@@ -525,30 +204,118 @@ function compute_density_stupid(pw::PlaneWaveBasis, bzmesh::BrilloinZoneMesh,
 end
 
 
-"""
-Kinetic-energy based preconditioner.
-Applies 1 / (|k + G|^2 + α) to the vectors, when called with ldiv!
+function self_consistent_field!(H::Hamiltonian, bzmesh::BrilloinZoneMesh,
+                                occupation::Vector{Float64};
+                                n_bands::Int=sum(occupation .> 0),
+                                PsiGuess=nothing, tol=1e-6)
+    @assert n_bands ≥ length(occupation)
 
-The rationale is to dampen the high-kinetic energy parts of the
-Hamiltonian and decreases their size, thus make the Hamiltonian
-more well-conditioned
-"""
-struct KineticPreconditionerBlock
-    # TODO Check what this guy is called in the literature normally
-    #      e.g. Kresse-Furtmüller paper
-    pw::PlaneWaveBasis
-    idx_kpoint::Int
-    qsq::Vector{Float64}
-    α::Float64
-    diagonal::Vector{Float64}
+    if n_bands > length(occupation)
+        occs = zeros(Float64, n_bands)
+        occs[1:length(occupation)] = occupation
+    else
+        occs = occupation
+    end
+
+    ene_old = NaN
+    Psi = nothing
+    if PsiGuess != nothing
+        Psi = PsiGuess
+        @assert size(PsiGuess[1], 2) == n_bands
+        ene_old = compute_energy(H, bzmesh, Psi, occs)["total"]
+        println("Starting ene:       $(ene_old)")
+    end
+
+    β_mix = 0.3
+    ρ_old = H.ρ
+    for i in 1:100
+        println("#\n# SCF iter $i\n#")
+        make_precond(Hk) = KineticPreconditionerBlock(Hk, α=0.1)
+        largest = false
+        res = lobpcg_full(H, largest, n_bands, tol=tol / 100,
+                          guess=Psi, preconditioner=make_precond)
+        Psi = [st.X for st in res]
+        println("\nlobpcg evals:")
+        for (i, st) in enumerate(res)
+            println("$i  $(real(st.λ))")
+        end
+
+        ρ = compute_density_stupid(H.pw, bzmesh, Psi, occs)
+        H = substitute_density!(H, ρ)
+        ene = compute_energy(H, bzmesh, Psi, occupation)
+
+        # Display convergence
+        diff = ene["total"] - ene_old
+        println()
+        for key in keys(ene)
+            if key != "total"
+                @printf("%8s =  %16.10g\n", key, ene[key])
+            end
+        end
+        @printf("%8s =  %16.10g\n", "total", ene["total"])
+        @printf("%8s =  %16.10g\n", "Δtotal", diff)
+        if abs(diff) < tol
+            println("\n#\n#-- SCF converged\n#")
+            return H, ene
+        end
+
+        if norm(ρ_old) > 0
+            ρ = β_mix * H.ρ + (1 - β_mix) * ρ_old
+            H = substitute_density!(H, ρ)
+        end
+
+        ene_old = ene["total"]
+        ρ_old = ρ
+
+        println()
+    end
+    return H, Dict(String, Float64)("total" => ene_old)
 end
-function KineticPreconditionerBlock(H::HamiltonianBlock; α=0)
-    qsq = H.T_k.qsq
-    diagonal = 1 ./ (qsq ./ 2 .+ 1e-6 .+ α)
-    KineticPreconditionerBlock(H.pw, H.idx_kpoint, qsq, α, diagonal)
-end
-function LinearAlgebra.ldiv!(Y, KinP::KineticPreconditionerBlock, B)
-    Y .= Diagonal(KinP.diagonal) * B
+
+
+#
+# Energy
+#
+function compute_energy(H::Hamiltonian, bzmesh::BrilloinZoneMesh,
+                        Psi::Wavefunction, occupation::Vector{Float64})
+    @assert real(H.potential_2e_real) == H.blocks[1].Vloc_k.potential_2e_real
+    @assert H.pw.kpoints == bzmesh.kpoints
+
+    dVol = H.pw.unit_cell_volume / prod(H.pw.fft_size)
+    e2e = 0.5 * sum(H.blocks[1].Vloc_k.potential_2e_real .* H.ρ) * dVol
+    e1e_loc = sum(H.blocks[1].Vloc_k.potential_1e_real .* H.ρ) * dVol
+
+    e_kin = 0.0
+    for ik in 1:length(bzmesh.kpoints)
+        Psi_k = Psi[ik]
+        w_k = bzmesh.weights[ik]
+        e_kin += w_k * occupation[ik] * tr(adjoint(Psi_k) * (H.blocks[ik].T_k * Psi_k))
+    end
+
+    e_nloc = 0.0
+    if H.blocks[1].Vnloc_k != nothing
+        # TODO One could be more clever about this and directly
+        #      use the projections
+        for ik in 1:length(bzmesh.kpoints)
+            Psi_k = Psi[ik]
+            w_k = bzmesh.weights[ik]
+            e_nloc += (
+                w_k * occupation[ik] * tr(adjoint(Psi_k) * (H.blocks[ik].Vnloc_k * Psi_k))
+            )
+        end
+    end
+
+    # TODO Nuclear repulsion and psp core energy
+
+    total = e_kin + e2e + e1e_loc + e_nloc
+    @assert imag(total) < 1e-12
+    Dict{String, Float64}(
+        "kinetic" => real(e_kin),
+        "e2e"     => real(e2e),
+        "e1e_loc" => real(e1e_loc),
+        "e_nloc"  => real(e_nloc),
+        "total"   => real(total)
+    )
 end
 
 #
@@ -623,6 +390,31 @@ function quicktest_silicon()
         [0.284385454518986, 0.359761906442770, 0.577352003566477,
          0.588385362008877, 0.688717726672163]
     ]
+    ref = [
+        [-0.178072428810715, 0.261616125031914, 0.262784140913747,
+          0.263316413356142, 0.353800852071277],
+        [-0.133973089764325, 0.106057092768291, 0.158523970429309,
+          0.236043055254138, 0.369766606388843],
+        [-0.068165395186365, 0.010628148024691, 0.122579725282070,
+          0.190369766912598, 0.325184211947709],
+        [-0.089624321030248, 0.004334893864463, 0.203685563865404,
+          0.214828905505821, 0.327528699634624]
+    ]
+
+    ene_ref_noXC = Dict{String, Float64}(
+        "e1e_loc" => -1.7783908803,
+        "kinetic" =>  3.0074897969,
+        "e_nloc"  =>  1.5085540922,
+        "e2e"     =>  0.4285114176,
+        "total"   =>  3.1661644264,
+    )
+    ene_ref = Dict{String, Float64}(
+        "e1e_loc" => -2.1757127578,
+        "kinetic" =>  3.2107081817,
+        "e_nloc"  =>  1.5804553245,
+        "e2e"     => -1.8327072303,
+        "total"   =>  0.7827435181,
+    )
 
     Z = 14
     a = 5.431020504 * ÅtoBohr
@@ -641,24 +433,33 @@ function quicktest_silicon()
     @assert maximum(abs.(H' - H)) < 1e-14
     @assert maximum(abs.(imag(H))) < 1e-12
 
-    Ham = Hamiltonian(pw, silicon, psp)
+    xc = Functional.(["lda_x", "lda_c_vwn"])
+    Ham = Hamiltonian(pw, silicon, psp, xc)
     Ham, ene = self_consistent_field!(Ham, bzmesh, occupation, n_bands=4, tol=1e-8)
-    potential_2e_real = solve_poisson(pw, Ham.ρ)
+    potential_2e_real = solve_poisson(pw, Ham.ρ) + compute_xc(xc, Ham.ρ)
 
     pw = substitute_kpoints(pw, kpoints)
     λs, vs = compute_bands(pw, silicon, potential_2e_real, psp=psp, n_bands=5)
-    ref = ref_noXC
+
+    # ref = ref_noXC
     for i in 1:length(ref)
-        println(λs[i] - ref[i])
+        println("eval $i ", λs[i] - ref[i])
         @assert maximum(abs.(ref[i] - λs[i])[1:4]) < 5e-5
         @assert maximum(abs.(ref[i] - λs[i])) < 1e-3
     end
 
-    @assert abs(ene["e1e_loc"] - -1.7783908803) < 1e-4
-    @assert abs(ene["kinetic"] -  3.0074897969) < 1e-4
-    @assert abs(ene["e_nloc"]  -  1.5085540922) < 1e-4
-    @assert abs(ene["e2e"]     -  0.4285114176) < 1e-4
-    @assert abs(ene["total"]   -  3.1661644264) < 1e-6
+    # TODO I think there is still some issue with the energy computation
+
+    # ene_ref = ene_ref_noXC
+    for k in keys(ene_ref)
+        @printf("%8s  %16.10g\n", k, abs(ene[k] - ene_ref[k]))
+        if k == "e1e_loc"
+            @assert abs(ene[k] - ene_ref[k]) < 5e-4
+        else
+            @assert abs(ene[k] - ene_ref[k]) < 1e-4
+        end
+    end
+    @assert abs(ene["total"] - ene_ref["total"]) < 1e-6
 end
 
 
@@ -674,12 +475,14 @@ function bands_silicon()
 
     Ecut = 25  # Hartree
     pw = PlaneWaveBasis(silicon, bzmesh.kpoints, Ecut)
+    println("FFT grid size: $(prod(pw.fft_size))")
     psp = PspHgh("./psp/CP2K-pade-Si-q4.hgh")
 
     # Run SCF to minimise wrt. density and get final 2e potential
-    H = Hamiltonian(pw, silicon, psp)
+    xc = Functional.(["lda_x", "lda_c_vwn"])
+    H = Hamiltonian(pw, silicon, psp, xc)
     H, ene = self_consistent_field!(H, bzmesh, occupation, n_bands=8, tol=1e-6)
-    potential_2e_real = solve_poisson(pw, H.ρ)
+    potential_2e_real = solve_poisson(pw, H.ρ) + compute_xc(H.xc, H.ρ)
 
     #
     # Compute and plot bands
@@ -692,7 +495,6 @@ function bands_silicon()
 
     # Form new pw basis with the kpoints for above path
     pw = substitute_kpoints(pw, kpath.kpoints)
-    println("FFT grid size: $(prod(pw.fft_size))")
 
     # Compute bands and plot
     λs, vs = compute_bands(pw, silicon, potential_2e_real, psp=psp, n_bands=15)
