@@ -10,6 +10,7 @@ include("Units.jl")
 include("PspHgh.jl")
 include("libxc.jl")
 include("blocks.jl")
+include("compute_ewald.jl")
 using PyPlot
 using ProgressMeter
 using IterativeSolvers
@@ -25,11 +26,13 @@ FunctionalXC = Vector{Functional}
 
 
 struct Hamiltonian{NonLocalPotential}
+    system::System
     pw::PlaneWaveBasis
     blocks::Vector{HamiltonianBlock{NonLocalPotential}}
     ρ::Array{Float64, 3}
     xc::FunctionalXC
     potential_2e_real::Array{ComplexF64, 3}
+    Zs::Vector{Float64}  # Charges for each atom
 end
 
 
@@ -49,9 +52,12 @@ function Hamiltonian(pw::PlaneWaveBasis, system::System,
     blocks = [HamiltonianBlock(pw, idx_kpoint, system, psp, potential_2e_real)
               for idx_kpoint in 1:length(pw.kpoints)]
     if psp == nothing
-        Hamiltonian{Nothing}(pw, blocks, ρguess, xc, potential_2e_real)
+        Hamiltonian{Nothing}(system, pw, blocks, ρguess, xc,
+                             potential_2e_real, system.Zs)
     else
-        Hamiltonian{PspNonLocalBlock}(pw, blocks, ρguess, xc, potential_2e_real)
+        Zs = psp.Zion .* ones(size(system.Zs))
+        Hamiltonian{PspNonLocalBlock}(system, pw, blocks, ρguess, xc,
+                                      potential_2e_real, Zs)
     end
 end
 
@@ -67,11 +73,10 @@ end
 function compute_xc(xc::FunctionalXC, ρ::Array{Float64, 3})
     accu = zeros(Float64, size(ρ)...)
     for i in 1:length(xc)
-        # TODO Better to use functional kind from libxc for this
-        if startswith(xc[i].name, "lda")
-            accu += evaluate_lda(xc[i], ρ, derivatives=[1])[1]
+        if xc[i].family == FunctionalFamily(1)
+            accu += evaluate_lda_potential(xc[i], ρ)
         else
-            error("Not implemented.")
+            error("Not implemented, functional family $(xc[i].family)")
         end
     end
     accu
@@ -152,7 +157,8 @@ end
 
 
 function compute_density_stupid(pw::PlaneWaveBasis, bzmesh::BrilloinZoneMesh,
-                                Psi::Wavefunction, occupation::Vector{Float64})
+                                Psi::Wavefunction, occupation::Vector{Float64};
+                                lobpcg_tol=1e-6)
     n_fft = prod(pw.fft_size)
     n_k = length(bzmesh.kpoints)
     @assert n_k == length(Psi)
@@ -182,7 +188,8 @@ function compute_density_stupid(pw::PlaneWaveBasis, bzmesh::BrilloinZoneMesh,
         # Check for orthonormality of the Ψ_k_reals
         Ψ_k_real_mat = reshape(Ψ_k_real, n_fft, n_states)
         Ψ_k_real_overlap = adjoint(Ψ_k_real_mat) * Ψ_k_real_mat
-        @assert maximum(abs.(Ψ_k_real_overlap - I * (n_fft / pw.unit_cell_volume))) < 1e-10
+        max_nondiag = maximum(abs.(Ψ_k_real_overlap - I * (n_fft / pw.unit_cell_volume)))
+        @assert max_nondiag < lobpcg_tol
 
         # Add the density from this kpoint
         for istate in 1:n_states
@@ -240,7 +247,7 @@ function self_consistent_field!(H::Hamiltonian, bzmesh::BrilloinZoneMesh,
             println("$i  $(real(st.λ))")
         end
 
-        ρ = compute_density_stupid(H.pw, bzmesh, Psi, occs)
+        ρ = compute_density_stupid(H.pw, bzmesh, Psi, occs, lobpcg_tol=tol / 100)
         H = substitute_density!(H, ρ)
         ene = compute_energy(H, bzmesh, Psi, occupation)
 
@@ -249,11 +256,11 @@ function self_consistent_field!(H::Hamiltonian, bzmesh::BrilloinZoneMesh,
         println()
         for key in keys(ene)
             if key != "total"
-                @printf("%8s =  %16.10g\n", key, ene[key])
+                @printf("%10s =  %16.10g\n", key, ene[key])
             end
         end
-        @printf("%8s =  %16.10g\n", "total", ene["total"])
-        @printf("%8s =  %16.10g\n", "Δtotal", diff)
+        @printf("%10s =  %16.10g\n", "total", ene["total"])
+        @printf("%10s =  %16.10g\n", "Δtotal", diff)
         if abs(diff) < tol
             println("\n#\n#-- SCF converged\n#")
             return H, ene
@@ -289,7 +296,7 @@ function compute_energy(H::Hamiltonian, bzmesh::BrilloinZoneMesh,
     for ik in 1:length(bzmesh.kpoints)
         Psi_k = Psi[ik]
         w_k = bzmesh.weights[ik]
-        e_kin += w_k * occupation[ik] * tr(adjoint(Psi_k) * (H.blocks[ik].T_k * Psi_k))
+        e_kin += w_k * tr(occupation[ik] * adjoint(Psi_k) * (H.blocks[ik].T_k * Psi_k))
     end
 
     e_nloc = 0.0
@@ -305,16 +312,19 @@ function compute_energy(H::Hamiltonian, bzmesh::BrilloinZoneMesh,
         end
     end
 
-    # TODO Nuclear repulsion and psp core energy
+    e_nuclear = compute_ewald(H.system, Zs=H.Zs)
 
-    total = e_kin + e2e + e1e_loc + e_nloc
+    # TODO psp core energy
+
+    total = e_kin + e2e + e1e_loc + e_nloc + e_nuclear
     @assert imag(total) < 1e-12
     Dict{String, Float64}(
+        "e_nuclear" => e_nuclear,
         "kinetic" => real(e_kin),
         "e2e"     => real(e2e),
         "e1e_loc" => real(e1e_loc),
         "e_nloc"  => real(e_nloc),
-        "total"   => real(total)
+        "total"   => real(total),
     )
 end
 
@@ -449,6 +459,8 @@ function quicktest_silicon()
     end
 
     # TODO I think there is still some issue with the energy computation
+    #      because XC and Hartree energy should use different density prefactors
+    #      (e.g. Hartree should use α + β density and XC only α density
 
     # ene_ref = ene_ref_noXC
     for k in keys(ene_ref)
@@ -487,9 +499,9 @@ function bands_silicon()
     #
     # Compute and plot bands
     #
-    path = [(:L, :Γ), (:Γ, :X), (:X, :U), (:K, :Γ)]
-    # path = [(:Γ, :X), (:X, :W), (:W, :K), (:K, :Γ), (:Γ, :L),
-    #         (:L, :U), (:U, :W), (:W, :L), (:L, :K)]
+    # path = [(:L, :Γ), (:Γ, :X), (:X, :U), (:K, :Γ)]
+    path = [(:Γ, :X), (:X, :W), (:W, :K), (:K, :Γ), (:Γ, :L),
+            (:L, :U), (:U, :W), (:W, :L), (:L, :K)]
     n_kpoints = 7
     kpath = BrilloinZonePath(silicon, path, n_kpoints)
 
@@ -500,6 +512,8 @@ function bands_silicon()
     λs, vs = compute_bands(pw, silicon, potential_2e_real, psp=psp, n_bands=15)
     plot_quantity(kpath, λs)
     savefig("bands_Si.pdf", bbox_inches="tight")
+
+    return kpath, λs
 end
 
 # TODO Put structure-factors into PlaneWaveBasis (or maybe some precomuted data object)
