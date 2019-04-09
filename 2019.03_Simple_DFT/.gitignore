@@ -1,1 +1,8 @@
 bands_Si.pdf
+/*.aux
+/*.log
+/*.blg
+/*.bbl
+/*.out
+/doc.pdf
+/energies.pdf
