@@ -19,6 +19,10 @@ end
 mutable struct XcFuncType
 end
 
+"""LibXC xc_func_info holder"""
+mutable struct XcFuncInfoType
+end
+
 
 """Return the version of the libxc library."""
 function libxc_version()
@@ -44,64 +48,101 @@ function libxc_available_functionals()
     [string(split(funcnames[i], "\0")[1]) for i in 1:n_xc]
 end
 
+@enum FunctionalKind begin
+    functional_exchange             = 0
+    functional_correlation          = 1
+    functional_exchange_correlation = 2
+    functional_kinetic              = 3
+end
 
-struct Functional
+@enum FunctionalFamily begin
+    family_unknown  = -1
+    family_lda      = 1
+    family_gga      = 2
+    family_mggai    = 4
+    family_lca      = 8
+    family_oep      = 16
+    family_hyb_gga  = 32
+    family_hyb_mgga = 64
+end
+
+
+mutable struct Functional
     number::Int
     name::String
+    kind::FunctionalKind
+    family::FunctionalFamily
+    n_spin::Int
+
+    # Pointer holding the LibXC representation of this functional
+    pointer::Ptr{XcFuncType}
 end
-function Functional(name::String)
+
+
+function Functional(name::String; n_spin::Int = 1)
+    @assert n_spin == 1
+
     number = ccall(@xcsym(:xc_functional_get_number), Cint, (Cstring, ), name)
     if number == -1
         error("Functional $name is not known.")
     end
-    Functional(number, name)
-end
 
-
-"""
-Compute LDA-type functional energy and derivatives
-(0 => energy, 1 => potential, 2 => 2nd derivative, 3 => 3rd derivative)
-"""
-function evaluate_lda(func::Functional, ρ::Array{Float64, 3};
-                      derivatives=[0, 1])
-    sort!(derivatives)
-    n_spin = 1  # Hard-coded right now
-
-    # Init and alloc
-    ptr = ccall(@xcsym(:xc_func_alloc), Ptr{XcFuncType}, ())
-    ret = ccall(@xcsym(:xc_func_init), Cint, (Ptr{XcFuncType}, Cint, Cint),
-                ptr, func.number, n_spin)
-
-    if derivatives == [1]
-        V_XC = zeros(Float64, size(ρ)...)
-        ccall(@xcsym(:xc_lda_vxc), Cvoid,
-              (Ptr{XcFuncType}, Cint, Ptr{Float64}, Ptr{Float64}),
-              ptr, length(ρ), ρ, V_XC)
-        return Dict(1 => V_XC)
-    elseif derivatives == [0]
-        E_XC = zeros(Float64, size(ρ)...)
-        ccall(@xcsym(:xc_lda_exc), Cvoid,
-              (Ptr{XcFuncType}, Cint, Ptr{Float64}, Ptr{Float64}),
-              ptr, length(ρ), ρ, E_XC)
-        return Dict(0 => E_XC)
-    elseif derivatives == [0, 1]
-        E_XC = zeros(Float64, size(ρ)...)
-        V_XC = zeros(Float64, size(ρ)...)
-        ccall(@xcsym(:xc_lda_exc_vxc), Cvoid,
-              (Ptr{XcFuncType}, Cint, Ptr{Float64}, Ptr{Float64}, Ptr{Float64}),
-              ptr, length(ρ), ρ, E_XC, V_XC)
-        return Dict(0 => E_XC, 1 => V_XC)
-    else
-        error("Not implemented: $derivatives")
+    function pointer_cleanup(ptr::Ptr{XcFuncType})
+        if ptr != C_NULL
+            ccall(@xcsym(:xc_func_end), Cvoid, (Ptr{XcFuncType}, ), ptr)
+            ccall(@xcsym(:xc_func_free), Cvoid, (Ref{XcFuncType}, ), ptr)
+        end
     end
 
-    # end and free
-    ccall(@xcsym(:xc_func_end), Cvoid, (Ptr{XcFuncType}, ), ptr )
-    ccall(@xcsym(:xc_func_free), Cvoid, (Ref{XcFuncType}, ), ptr )
+    pointer = ccall(@xcsym(:xc_func_alloc), Ptr{XcFuncType}, ())
+    try
+        # Initialise to the desired functional
+        ret = ccall(@xcsym(:xc_func_init), Cint, (Ptr{XcFuncType}, Cint, Cint),
+                    pointer, number, n_spin)
+        if ret != 0
+            error("Something went wrong initialising the functional")
+        end
+
+        ptr_info = ccall(@xcsym(:xc_func_get_info), Ptr{XcFuncInfoType},
+                         (Ptr{XcFuncType}, ), pointer)
+        kind = ccall(@xcsym(:xc_func_info_get_kind), Cint, (Ptr{XcFuncInfoType}, ),
+                     ptr_info)
+        family = ccall(@xcsym(:xc_func_info_get_family), Cint, (Ptr{XcFuncInfoType}, ),
+                       ptr_info)
+        # flags = ccall(@xcsym(:xc_func_info_get_flags), Cint, (Ptr{XcFuncInfoType}, ),
+        #               ptr_info)
+
+        # Make functional and attach finaliser for cleaning up the pointer
+        func = Functional(number, name, FunctionalKind(kind),
+                          FunctionalFamily(family), n_spin, pointer)
+        finalizer(cls -> pointer_cleanup(cls.pointer), func)
+        return func
+    catch
+        pointer_cleanup(pointer)
+        rethrow()
+    end
 end
 
 
-# LDA_X = Functional("lda_x")
-# LDA_C = Functional("lda_c_vwn")
-# PBE_X = Functional("gga_x_pbe")
-# PBE_C = Functional("gga_c_pbe")
+function evaluate_lda_energy(func::Functional, ρ::Array{Float64, 3})
+    @assert func.family == FunctionalFamily(1)
+    @assert func.n_spin == 1
+
+    E_XC = zeros(Float64, size(ρ)...)
+    ccall(@xcsym(:xc_lda_exc), Cvoid, (Ptr{XcFuncType}, Cint, Ptr{Float64}, Ptr{Float64}),
+          func.pointer, length(ρ), ρ, E_XC)
+    return E_XC
+end
+
+
+function evaluate_lda_potential(func::Functional, ρ::Array{Float64, 3})
+    @assert func.family == FunctionalFamily(1)
+    @assert func.n_spin == 1
+
+    V_XC = zeros(Float64, size(ρ)...)
+    ccall(@xcsym(:xc_lda_vxc), Cvoid, (Ptr{XcFuncType}, Cint, Ptr{Float64}, Ptr{Float64}),
+          func.pointer, length(ρ), ρ, V_XC)
+    return V_XC
+end
+
+# TODO gga
