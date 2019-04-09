@@ -6,7 +6,7 @@ System to be modelled
 """
 struct System
     """3x3 lattice vectors, in columns. |Γ| = det(A)"""
-    A::Matrix{Float64}   # TODO rename
+    A::Matrix{Float64}   # TODO rename e.g. metric_direct
 
     """List of atomic positions in the unit cell"""
     atoms::Vector{Vector{Float64}}
@@ -16,7 +16,7 @@ struct System
 
     # Derived quantities
     """Reciprocal lattice"""
-    B::Matrix{Float64}   # TODO rename
+    B::Matrix{Float64}   # TODO rename e.g. metric_reciprocal
 
     """Volume of the unit cell"""
     unit_cell_volume::Float64
@@ -45,7 +45,7 @@ end
 """
 Construct a system of the diamond structure
 """
-function build_diamond_system(a, Z)
+function build_system_diamond(a, Z)
     A = a / 2 .* [[0 1 1.]
                   [1 0 1.]
                   [1 1 0.]]
@@ -63,3 +63,19 @@ function build_diamond_system(a, Z)
     )
     System(A, atoms, Zs, high_sym_points, "diamond")
 end
+
+
+function build_system_sc(a, atoms::Vector{Vector{Float64}},
+                         Zs::Vector{Float64})
+    A = Matrix(a * I, 3, 3)
+    high_sym_points=Dict{Symbol, Vector{Float64}}(
+        :Γ => 2π/a .* [  0,   0,   0],
+        :R => 2π/a .* [1/2, 1/2, 1/2],
+        :X => 2π/a .* [  0, 1/2,   0],
+        :M => 2π/a .* [1/2, 1/2,   0],
+    )
+    System(A, atoms, Zs, high_sym_points, "simple_cubic")
+end
+
+build_diamond_system = build_system_diamond
+build_system_simple_cubic = build_system_sc
