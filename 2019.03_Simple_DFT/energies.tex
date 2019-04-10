@@ -1,0 +1,273 @@
+\documentclass{MFHarticle}
+\usepackage{MFHcolours}
+\usepackage{MFHscience}
+\usepackage{todonotes}
+\newcommand{\todoil}{\todo[caption={},inline]}
+
+\begin{document}
+\title{Computing the total energy in a Goedecker, Teter, Hutter,
+Hartwigsen pseudopotential model}
+\author{Michael F. Herbst}
+\maketitle
+
+\section{Terminology}
+\begin{description}
+	\item[$\vec{K}$] Vector on the reciprocal lattice $\mathcal{R}^\ast$
+	\item[$\vec{k}$] Vector inside the first Brillouin zone $\mathcal{B}$
+	\item[$\vec{q}$] Reciprocal-space vector $\vec{q} = \vec{k} + \vec{K}$
+	\item[$\vec{R}$] Vector on the lattice $\mathcal{R}$
+	\item[$\vec{r}$] Vector inside the unit cell
+	\item[$\vec{x}$] Real-space vector, $\vec{x} = \vec{r} + \vec{R}$
+	\item[$\Omega$] Unit cell / unit cell volume
+	\item[$\Gamma$] Unit cell
+	\item[$e_{\vec{K}}$] Plane wave
+		\[ e_{\vec{K}}(\vec{r}) = \frac1{\sqrt{\Omega}} \exp(\I \vec{K} \cdot \vec{r})\]
+	\item[$\Op{T}_{\vec{R}}$] Lattice translation operator
+		\[ \Op{T}_{\vec{R}} u(\vec{x}) = u(\vec{x} - \vec{R}) \]
+\end{description}
+
+
+
+\section{Electrostatic energy}
+
+Follow \citet{Payne1992}
+
+\subsection{Smooth, periodic densities}
+
+\todoil{Discuss exact conditions}
+Given two compact and smooth charge densities
+$\rho$ and $\tilde{\rho}$,
+their classical Coulombic interaction is given by the integral
+\begin{equation}
+	\frac12
+	\int_{\R^3 \times \R^3}
+	\frac{\rho(\vec{x}) \tilde{\rho}(\vec{x}')}{\norm{\vec{x} - \vec{x}'}}
+	\D\vec{x} \D\vec{x}'.
+	\label{eqn:ElectrostaticEnergySmooth}
+\end{equation}
+A special case of this expression is the Coulombic interaction energy,
+effectively amounting to $\rho = \tilde{\rho}$ in the expression above.
+
+For the case of a periodic system the charge density $\rho(\vec{x})$ is not
+compact, such that integral \eqref{eqn:ElectrostaticEnergySmooth}
+is no longer meaningful.
+Instead one therefore wishes to look
+at the equivalent quantities per unit cell
+\begin{equation}
+	D(\rho, \tilde{\rho}) \equiv
+	\frac12
+	\int_{\Gamma \times \R^3}
+	\frac{\rho(\vec{x}) \tilde{\rho}(\vec{x}')}{\norm{\vec{x} - \vec{x}'}}
+	\D\vec{x} \D\vec{x}'
+	\label{eqn:ElectrostaticEnergyPeriodic}
+\end{equation}
+and
+\[
+	E(\rho) = D_\Gamma(\rho, \rho).
+\]
+Unfortunately even for smooth periodic densities $\rho(\vec{x})$
+\eqref{eqn:ElectrostaticEnergyPeriodic}
+in general does diverge and is thus formally not defined.
+To see this consider the Hartree potential term $V_\rho$,
+i.e.~the integral
+\begin{equation}
+	\int_{\R^3}
+	\frac{\rho(\vec{x}')}{\norm{\vec{r} - \vec{x}'}}
+	\D\vec{x}'.
+	\label{eqn:ElectrostaticPotential}
+\end{equation}
+Already for simple densities, e.g.~a uniform constant density
+with $\rho(\vec{x}) = \epsilon > 0$,
+the integrand is not even absolutely integrable,
+i.e.~the integral
+\begin{equation}
+	\int_{\R^3} \abs{  \frac{\rho(\vec{x}')}{\norm{\vec{r} - \vec{x}'}}  }
+	\D\vec{x}'
+	\label{eqn:ElectrostaticPotentialAbsolute}
+\end{equation}
+diverges.
+Thus the integral in \eqref{eqn:ElectrostaticPotential}
+does not exist in the Lebesgue sense.
+Even if additionally charge neutrality,
+\[\int_{\R^3} \rho(\vec{x}) \D\vec{x} =0, \]
+is demanded for the density,
+the $1/x$ kernel decays too slowly to ensure existence
+of the absolute integral \eqref{eqn:ElectrostaticPotentialAbsolute}.
+
+As a remedy one may regularise, i.e. replace the $1/x$ interaction
+Kernel by a Yukawa-type interaction
+\[ K_\alpha(x) = e^{-\alpha x} / x \]
+with $\alpha > 0$ small and consider integrals
+\begin{equation}
+	D_\alpha(\rho, \tilde{\rho}) \equiv
+	\frac12
+	\int_{\Gamma \times \R^3}
+	\rho(\vec{x})\, \tilde{\rho}(\vec{x}')
+	\,
+	K_\alpha\!\left(\norm{\vec{x} - \vec{x}'}\right)
+	\D\vec{x} \D\vec{x}'
+	\label{eqn:ElectrostaticIntegralYukawa}
+\end{equation}
+and corresponding energies
+\begin{equation}
+	E_\alpha(\rho) = D_\alpha(\rho, \rho).
+	\label{eqn:ElectrostaticEnergyYukawa}
+\end{equation}
+The integral
+\eqref{eqn:ElectrostaticIntegralYukawa} is summable
+for a smooth density $\rho(\vec{x})$,
+i.e.~a density, which is not a sum of Diracs.
+Since $\rho$ is $\mathcal{R}$-periodic one may expand it exactly
+in a countably infinite number of plane waves
+\[
+	\rho(\vec{x}) = \sum_{\vec{G} \in \mathcal{R}^\ast}
+		\hat{\rho}(\vec{G}) e_{\vec{G}}
+		\qquad \text{and} \qquad
+	\tilde{\rho}(\vec{x}) = \sum_{\vec{G} \in \mathcal{R}^\ast}
+		\hat{\tilde{\rho}}(\vec{G}) e_{\vec{G}}
+\]
+and use this to compute the convolution \eqref{eqn:ElectrostaticIntegralYukawa}
+in Fourier space as
+\begin{align}
+	\nonumber
+	D_\alpha(\rho, \tilde{\rho}) &=
+	\frac12
+	\sum_{\vec{G} \in \mathcal{R}^\ast}
+	\sum_{\vec{G}' \in \mathcal{R}^\ast}
+	\int_{\Gamma \times \R^3}
+	\hat{\rho}(\vec{G}) e_{\vec{G}}(\vec{r})
+	\,
+	\hat{\tilde{\rho}}(\vec{G}') e_{\vec{G}'}(\vec{x}')
+	\,K_\alpha\!\left(\norm{\vec{r} - \vec{x}'}\right)
+	\D\vec{r} \D\vec{x}' \\
+	&=
+	\nonumber
+	\frac12
+	\sum_{\vec{G} \in \mathcal{R}^\ast}
+	\sum_{\vec{G}' \in \mathcal{R}^\ast}
+	\int_{\Gamma}
+	\hat{\rho}(\vec{G}) e_{\vec{G}}(\vec{x})
+	\,
+	\hat{K}_\alpha(\vec{G}') \hat{\tilde{\rho}}(\vec{G}') e_{\vec{G}'}(\vec{x})
+	\D\vec{r} \\
+	&=
+	\nonumber
+	\frac12
+	\sum_{\vec{G} \in \mathcal{R}^\ast}
+	\sum_{\vec{G}' \in \mathcal{R}^\ast}
+	\hat{\rho}(\vec{G})
+	\hat{K}_\alpha(\vec{G}') \hat{\tilde{\rho}}(\vec{G}')
+	\, \frac{1}{\Omega} \int_{\Gamma}
+	\exp\big(\I\, \vec{r} \cdot \left( \vec{G} + \vec{G}' \right)\big)
+	\D\vec{r} \\
+	&?=
+	\nonumber
+	\frac12
+	\sum_{\vec{G} \in \mathcal{R}^\ast}
+	\hat{\rho}(\vec{G})
+	\hat{K}_\alpha(-\vec{G}) \hat{\tilde{\rho}}(-\vec{G})\\
+	\label{eqn:ElectrostaticEnergyYukawaSeries}
+	&=
+	\frac12
+	\sum_{\vec{G} \in \mathcal{R}^\ast}
+	\frac{4\pi \hat{\rho}(\vec{G}) \left(\hat{\tilde{\rho}}(\vec{G})\right)^\ast}
+	{G^2 + \alpha^2},
+\end{align}
+\todoil{One line not clear above.}
+where in the last line we used that the density $\rho$ is a real quantity.
+
+For the existence of the limit%
+\footnote{Note, that we always need $\rho$ to be smooth here.
+	Otherwise the Fourier coefficients $\hat{\rho}$ do not decay rapidly enough
+	for the series in \eqref{eqn:ElectrostaticEnergyYukawaSeries}
+	to be summable.}
+\[ D(\rho, \tilde{\rho}) = \lim_{\alpha \to 0} D_\alpha(\rho, \tilde{\rho}) \]
+we are interested in, the DC ($G = 0$) Fourier coefficient has to vanish,
+which is exactly the case iff $\rho(G) =0$ or $\hat{\rho}(G) = 0$.
+Thus at least one of the densities needs to have a zero charge average,
+i.e.~needs to be charge-neutral.
+
+For smooth, charge-neutral densities one may thus compute
+the electrostatic energy by a \textbf{summation in Fourier space}.
+
+\subsection{Treating the nuclei-nuclei term}
+In a DFT treatment we are interested in the total electrostatic energy
+per unit cell, i.e.~the energy of the Coulombic interaction of both
+electrons and nuclei combined.
+Let
+\[
+	\rho_N(\vec{x}) = \sum_{\vec{R}\in \mathcal{R}} \Op{T}_{\vec{R}}
+	\sum_i Z_i \delta(\vec{x} - \vec{t}_i)
+\]
+be the periodic and discrete density of the nuclei
+and $\rho_e$ the corresponding electronic charge to ensure net
+neutrality
+\[\int_\Gamma \rho_e + \rho_N \D\vec{r} = 0. \]
+Our aim is thus to compute%
+\footnote{Note that the sum for the nuclei-nuclei interaction
+cannot be replaced
+by the simpler integral
+$\frac12 \int_{\Gamma \times \R^3} \rho_N(r) \rho_N(x) K(x-r)\D \vec{r} \D \vec{x}$
+because such an integral is always ill-defined due to the
+contact term at $K(0) = -\infty$.}
+\begin{align}
+	\nonumber
+	\int_{\Gamma \times \R^3}
+	&\frac12\rho_e(\vec{r}) \rho_e(\vec{x}') \, K\!\left(\norm{\vec{r}-\vec{x}'}\right)
+	+\rho_e(\vec{r}) \rho_N(\vec{x}') \, K\!\left(\norm{\vec{r}-\vec{x}'}\right) \\
+	&+
+	\sum_i
+	\sum_{j>i} Z_i Z_j
+	\left(
+	\sum_{\vec{R}'\in \mathcal{R}}
+	\Op{T}_{\vec{R}'}
+	\delta(\vec{r} - \vec{t}_i)
+	\right)
+	\left(
+	\sum_{\vec{R}\in \mathcal{R}}
+	\Op{T}_{\vec{R}}
+	\delta(\vec{x}' - \vec{t}_j)
+	\right)
+	K\!\left(\norm{\vec{r}-\vec{x}'}\right)
+	\D\vec{r} \D\vec{x}'.
+	\label{eqn:ElectrostaticDFT}
+\end{align}
+where $K(x) = 1/x$ is the Coulomb kernel.
+
+Our aim for computing \eqref{eqn:ElectrostaticDFT}
+is to follow the route sketched in the previous section,
+i.e.~to replace $K$ by the regularised $K_\alpha$,
+express the integral as a Fourier series and take
+the limit $\alpha\to0$.
+Unfortunately the total density $\rho \equiv \rho_e + \rho_N$
+is no longer smooth in this case,
+which causes trouble especially in
+the last term of \eqref{eqn:ElectrostaticDFT},
+where the Fourier coefficients will converge too slowly.
+
+\newcommand{\tlr}[1]{\textcolor{red}{#1}}
+\newcommand{\tsr}[1]{\textcolor{blue}{#1}}
+To make progress we will smear out the discrete nuclear charges
+by a Gaussian blur and carry the error in a second term.
+For a given parameter $\eta > 0$ to be discussed later, we set
+\begin{align}
+	\label{eqn:TermSplitup}
+	\nonumber
+	\delta(\vec{x}) &=
+	\tlr{\left( \frac{\eta}{\pi} \right)^{3/2} \exp\left( -\eta^2 x^2 \right)}
+		+ \tsr{\left(
+		\delta(\vec{x}) -
+	\left( \frac{\eta^2}{\pi} \right)^{3/2} \exp\left( -\eta^2 x^2 \right)
+	\right)} \\
+	&\equiv
+	\tlr{G_\eta(\vec{x})}
+	+ \tsr{\left( \delta(\vec{x}) - G_\eta(\vec{x}) \right)}.
+\end{align}
+Replacing $1/x$ by the Yukawa kernel $K_\alpha(x)$
+makes each term of \eqref{eqn:ElectrostaticDFT} convergent.
+Therefore we can treat each summand individually.
+For example for $i\neq j$ one of the last set of terms
+can be rewritten as follows:
+\bibliographystyle{mfh}
+\bibliography{literatur}
+\end{document}
