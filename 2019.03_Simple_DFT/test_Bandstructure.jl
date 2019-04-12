@@ -516,7 +516,15 @@ function bands_silicon()
     return kpath, λs
 end
 
-# TODO Put structure-factors into PlaneWaveBasis (or maybe some precomuted data object)
+function dump_bandstructure(kpath, λs, file)
+    open(file, "w") do fp
+        for (i, acculen) in enumerate(kpath.accumulated_arclength)
+            @assert length(λs[i]) ≥ 5
+            λ = λs[i][1:5]
+            @printf(fp, "%20.12f%20.12f%20.12f%20.12f%20.12f\n", acculen, λ...)
+        end
+    end
+end
 
 main() = bands_silicon()
 
