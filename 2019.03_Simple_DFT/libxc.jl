@@ -139,10 +139,70 @@ function evaluate_lda_potential(func::Functional, ρ::Array{Float64, 3})
     @assert func.family == FunctionalFamily(1)
     @assert func.n_spin == 1
 
-    V_XC = zeros(Float64, size(ρ)...)
+    Vρ_XC = zeros(Float64, size(ρ)...)
     ccall(@xcsym(:xc_lda_vxc), Cvoid, (Ptr{XcFuncType}, Cint, Ptr{Float64}, Ptr{Float64}),
-          func.pointer, length(ρ), ρ, V_XC)
-    return V_XC
+          func.pointer, length(ρ), ρ, Vρ_XC)
+    return Vρ_XC
 end
 
-# TODO gga
+
+function evaluate_lda!(func::Functional, ρ::Array{Float64, 3},
+                       E_XC::Array{Float64, 3}, Vρ_XC::Array{Float64, 3})
+    @assert func.family == FunctionalFamily(1)
+    @assert func.n_spin == 1
+    @assert size(E_XC) == size(ρ)
+    @assert size(Vρ_XC) == size(ρ)
+
+    ccall(@xcsym(:xc_lda_exc_vxc), Cvoid,
+                 (Ptr{XcFuncType}, Cint, Ptr{Float64}, Ptr{Float64}, Ptr{Float64}),
+                 func.pointer, length(ρ), ρ, E_XC, Vρ_XC)
+    E_XC, Vρ_XC
+end
+
+"""
+Evaluate the energy of a GGA functional
+
+ρ      Density on the grid
+σ      Contracted density gradient (∇ρ \cdot ∇ρ) on a grid
+"""
+function evaluate_gga_energy(func::Functional, ρ::Array{Float64, 3}, σ::Array{Float64, 3})
+    @assert func.family == FunctionalFamily(2)
+    @assert func.n_spin == 1
+
+    E_XC = zeros(Float64, size(ρ)...)
+    ccall(@xcsym(:xc_gga_exc), Cvoid,
+          (Ptr{XcFuncType}, Cint, Ptr{Float64}, Ptr{Float64}, Ptr{Float64}),
+          func.pointer, length(ρ), ρ, σ, E_XC)
+    return E_XC
+end
+
+
+function evaluate_gga_potential(func::Functional, ρ::Array{Float64, 3},
+                                σ::Array{Float64, 3})
+    @assert func.family == FunctionalFamily(2)
+    @assert func.n_spin == 1
+
+    Vρ_XC = zeros(Float64, size(ρ)...)
+    Vσ_XC = zeros(Float64, size(ρ)...)
+    ccall(@xcsym(:xc_gga_vxc), Cvoid,
+          (Ptr{XcFuncType}, Cint, Ptr{Float64}, Ptr{Float64}, Ptr{Float64}, Ptr{Float64}),
+          func.pointer, length(ρ), ρ, ρ, Vρ_XC, Vσ_XC)
+    return Vρ_XC, Vσ_XC
+end
+
+
+function evaluate_gga!(func::Functional, ρ::Array{Float64, 3},
+                       σ::Array{Float64, 3}, E_XC::Array{Float64, 3},
+                       Vρ_XC::Array{Float64, 3}, Vσ_XC::Array{Float64, 3})
+    @assert func.family == FunctionalFamily(2)
+    @assert func.n_spin == 1
+    @assert size(E_XC) == size(ρ)
+    @assert size(Vρ_XC) == size(ρ)
+    @assert size(Vσ_XC) == size(ρ)
+
+    ccall(@xcsym(:xc_gga_exc_vxc), Cvoid,
+                 (Ptr{XcFuncType}, Cint, Ptr{Float64}, Ptr{Float64}, Ptr{Float64},
+                  Ptr{Float64}, Ptr{Float64}),
+                 func.pointer, length(ρ), ρ, σ, E_XC, Vρ_XC, Vσ_XC)
+    E_XC, Vρ_XC, Vσ_XC
+end
