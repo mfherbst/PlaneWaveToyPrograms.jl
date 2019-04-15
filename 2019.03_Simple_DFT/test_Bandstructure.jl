@@ -33,6 +33,7 @@ struct Hamiltonian{NonLocalPotential}
     xc::FunctionalXC
     potential_2e_real::Array{ComplexF64, 3}
     Zs::Vector{Float64}  # Charges for each atom
+    psp::Union{PspHgh, Nothing}
 end
 
 
@@ -53,11 +54,11 @@ function Hamiltonian(pw::PlaneWaveBasis, system::System,
               for idx_kpoint in 1:length(pw.kpoints)]
     if psp == nothing
         Hamiltonian{Nothing}(system, pw, blocks, ρguess, xc,
-                             potential_2e_real, system.Zs)
+                             potential_2e_real, system.Zs, nothing)
     else
         Zs = psp.Zion .* ones(size(system.Zs))
         Hamiltonian{PspNonLocalBlock}(system, pw, blocks, ρguess, xc,
-                                      potential_2e_real, Zs)
+                                      potential_2e_real, Zs, psp)
     end
 end
 
@@ -313,10 +314,9 @@ function compute_energy(H::Hamiltonian, bzmesh::BrilloinZoneMesh,
     end
 
     e_nuclear = compute_ewald(H.system, Zs=H.Zs)
+    e_core = compute_energy_psp_core(H.psp, H.system)
 
-    # TODO psp core energy
-
-    total = e_kin + e2e + e1e_loc + e_nloc + e_nuclear
+    total = e_kin + e2e + e1e_loc + e_nloc + e_nuclear + e_core
     @assert imag(total) < 1e-12
     Dict{String, Float64}(
         "e_nuclear" => e_nuclear,
@@ -324,6 +324,7 @@ function compute_energy(H::Hamiltonian, bzmesh::BrilloinZoneMesh,
         "e2e"     => real(e2e),
         "e1e_loc" => real(e1e_loc),
         "e_nloc"  => real(e_nloc),
+        "e_core"  => e_core,
         "total"   => real(total),
     )
 end
@@ -423,7 +424,9 @@ function quicktest_silicon()
         "kinetic" =>  3.2107081817,
         "e_nloc"  =>  1.5804553245,
         "e2e"     => -1.8327072303,
-        "total"   =>  0.7827435181,
+        "e_core"  => -0.2946220670,
+        "e_nuclear" => -8.3978935784,
+        "total"   =>  -7.9097721273,
     )
 
     Z = 14

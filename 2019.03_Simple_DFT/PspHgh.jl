@@ -158,3 +158,35 @@ function eval_psp_projection_radial(psp::PspHgh, i, l, qsq::Number)
 
     throw(ErrorException("Did not implement case of i == $i and l == $l"))
 end
+
+
+"""
+Evaluate the electrostatic energy contribution of the pseudopotential core.
+
+This is equivalent to the contribution to the DC Fourier component of the
+pseudopotential required to not make the electrostatic integal blow up as G -> 0.
+"""
+function compute_energy_psp_core(psp_::PspHgh, system::System)
+    # TODO This routine assumes that there is only one species
+    #      with exactly one psp applied for all of them
+    pspmap = Dict(system.Zs[1] =>  psp_)
+
+    # Total number of explicitly treated electrons
+    # (in neutral crystal with pseudopotentials equal to total ionic charge)
+    Nelec = sum(pspmap[Z].Zion for Z in system.Zs)
+
+    ene = 0.0
+    for (iat, Z) in enumerate(system.Zs)
+        psp = pspmap[Z]
+        Zion = psp.Zion
+        rloc = psp.rloc
+        C(idx) = idx <= length(psp.c) ? psp.c[idx] : 0.0
+
+        term = (
+              Zion * rloc^2 / 2
+            + sqrt(π/2) * rloc^3 * (C(1) + 3*C(2) + 15*C(3) + 105*C(4))
+        )
+        ene += 4π * Nelec / system.unit_cell_volume * term
+    end
+    return ene
+end
