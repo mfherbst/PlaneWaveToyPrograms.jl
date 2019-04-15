@@ -39,6 +39,9 @@ struct PlaneWaveBasis
     (DC component in the middle, others periodically, asymmetrically around it"""
     idx_to_fft::Vector{Vector{Int}}
 
+    """Coordinate associated to a grid point of the real-space grid"""
+    Rs::Array{Vector{Float64}, 3}
+
     # Space to store planned FFT operators from FFTW
     """Plan for forward FFT"""
     FFT::typeof(plan_fft!(im * randn(2, 2, 2)))
@@ -89,13 +92,23 @@ function PlaneWaveBasis(system::System, kpoints::Vector{Vector{Float64}}, Ecut;
     n_G = length(Gs)
     idx_to_fft = [1 .+ mod.(coords[ig], fft_size) for ig in 1:n_G]
 
+    # Form real-space points on grid
+    rmax = [ceil(Int, fft_size[idim] / 2) for idim in 1:3]
+
+    rcmax = ceil.(Int, fft_size ./ 2)
+    Rs = Array{Vector{Float64}, 3}(undef, fft_size...)
+    for klm in CartesianIndices(Rs)
+        rcoord = mod.([klm.I...] .- rcmax .- 1, fft_size) .- rcmax
+        Rs[klm] = system.A * (rcoord ./ fft_size)
+    end
+
     tmp = Array{ComplexF64}(undef, fft_size...)
     fft_plan = plan_fft!(tmp)  # can play with FFTW flags here
     ifft_plan = plan_ifft!(tmp) # can play with FFTW flags here
 
     PlaneWaveBasis(kpoints, system.unit_cell_volume, Ecut, Gs,
                    idx_DC, Gmash, fft_supersampling, fft_size,
-                   idx_to_fft, fft_plan, ifft_plan)
+                   idx_to_fft, Rs, fft_plan, ifft_plan)
 end
 
 
@@ -180,7 +193,7 @@ function substitute_kpoints(pw::PlaneWaveBasis, kpoints::Vector{Vector{Float64}}
 
     PlaneWaveBasis(kpoints, pw.unit_cell_volume, pw.Ecut, pw.Gs,
                    pw.idx_DC, Gmask, pw.fft_supersampling, pw.fft_size,
-                   pw.idx_to_fft, pw.FFT, pw.iFFT)
+                   pw.idx_to_fft, pw.Rs, pw.FFT, pw.iFFT)
 end
 
 

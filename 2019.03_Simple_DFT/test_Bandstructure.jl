@@ -16,6 +16,12 @@ using ProgressMeter
 using IterativeSolvers
 import IterativeSolvers: LOBPCGResults
 
+# XXX
+# TODO  Report on choleski error in LOBPCG
+# XXX
+
+# TODO Put structure-factors into PlaneWaveBasis (or maybe some precomuted data object)
+
 # TODO qsq should only be computed once for each k
 
 #
@@ -45,7 +51,7 @@ function Hamiltonian(pw::PlaneWaveBasis, system::System,
     if ρguess == nothing
         ρguess = zeros(Float64, pw.fft_size...)
     else
-        potential_2e_real = solve_poisson(pw, ρguess) + compute_xc(xc, ρguess)
+        potential_2e_real = solve_poisson(pw, ρguess) + compute_xc(pw, xc, ρguess)
         println("norm(imag(potential_2e_real)) == $(norm(imag(potential_2e_real)))")
         @assert norm(imag(potential_2e_real)) < 1e-12
     end
@@ -70,12 +76,60 @@ function solve_poisson(pw::PlaneWaveBasis, ρ::Array{Float64, 3})
     G_to_R(pw, VHartree_Fourier)
 end
 
+function compute_gradient(pw::PlaneWaveBasis, ρ::Array{Float64, 3})
+    ρ_Fourier = R_to_G!(pw, copy(ρ))
+    ∇ρ = Vector{Array{Float64, 3}}(undef, 3)
+    for α in 1:3
+        res = G_to_R(pw, [im * G[α] * ρ_Fourier[ig] for (ig, G) in enumerate(pw.Gs)])
+        @assert maximum(abs.(imag(res))) < 1e-12
+        ∇ρ[α] = real(res)
+    end
+    return ∇ρ
+end
 
-function compute_xc(xc::FunctionalXC, ρ::Array{Float64, 3})
+function compute_xc(pw::PlaneWaveBasis, xc::FunctionalXC, ρ::Array{Float64, 3})
     accu = zeros(Float64, size(ρ)...)
+
+    if any(fun.family == FunctionalFamily(2) for fun in  xc)
+        # Calculate contracted density gradient σ
+        ∇ρ = compute_gradient(pw, ρ)
+        σ = sum(∇ρ[α] .* ∇ρ[α] for α in 1:3)
+    end
+
+    # In the following calls we use the symbol convention (in agreement with libxc)
+    #     s, t                        Spin indices
+    #     E_XC                        Energy density per unit particle
+    #     ρ_s                         Density for spin s
+    #     σ_{st}   = ∇ρ_s ⋅ ∇ρ_t      Contracted density gradient
+    #     Vρ_XC    = ∂E_XC / ∂ρ_s
+    #     Vσ_XC    = ρ ∂(E_XC)/(∂σ_{st}) =   TODO unsure here
+    #
+    # is the derivative of the XC energy wrt. the density
+    # Vσ_XC is the derivative of the XC energy wrt. the density gradients σ
     for i in 1:length(xc)
         if xc[i].family == FunctionalFamily(1)
             accu += evaluate_lda_potential(xc[i], ρ)
+        elseif xc[i].family == FunctionalFamily(2)
+            # Evaluate GGA
+            Vρ_XC, Vσ_XC = evaluate_gga_potential(xc[i], ρ, σ)
+
+            # TODO Which scheme is this? ... compare to p.158 in the Martins book
+            # Compute gradient correction term
+            #   ρ (∂E_{XC} / ∂∇ρ) ∇
+
+            Vσ∇ρ = [Vσ_XC .* ∇ρ[α] for α in 1:3]
+            Vσ∇ρ_Fourier = [R_to_G!(pw, copy(Vσ∇ρ[α])) for α in 1:3]
+            @assert length(Vσ∇ρ_Fourier[1]) == length(pw.Gs)
+            out_Fourier = zeros(ComplexF64, length(pw.Gs))
+            for (ig, G) in enumerate(pw.Gs)
+                out_Fourier[ig] = sum(im * G[α] * Vσ∇ρ_Fourier[α][ig] for α in 1:3)
+            end
+
+            out = G_to_R(pw, out_Fourier)
+            @assert maximum(abs.(imag(out))) < 1e-12
+            out = real(out)
+
+            accu += Vρ_XC - 2.0 * out
         else
             error("Not implemented, functional family $(xc[i].family)")
         end
@@ -86,7 +140,7 @@ end
 
 function substitute_density!(H::Hamiltonian, ρ::Array{Float64, 3})
     H.ρ[:] = ρ
-    H.potential_2e_real[:] = solve_poisson(H.pw, ρ) + compute_xc(H.xc, ρ)
+    H.potential_2e_real[:] = solve_poisson(H.pw, ρ) + compute_xc(H.pw, H.xc, ρ)
     @assert norm(imag(H.potential_2e_real)) < 1e-12
     for b in H.blocks
         b.Vloc_k.potential_2e_real[:] = real(H.potential_2e_real[:])
@@ -401,7 +455,7 @@ function quicktest_silicon()
         [0.284385454518986, 0.359761906442770, 0.577352003566477,
          0.588385362008877, 0.688717726672163]
     ]
-    ref = [
+    ref_LDA = [
         [-0.178072428810715, 0.261616125031914, 0.262784140913747,
           0.263316413356142, 0.353800852071277],
         [-0.133973089764325, 0.106057092768291, 0.158523970429309,
@@ -411,6 +465,16 @@ function quicktest_silicon()
         [-0.089624321030248, 0.004334893864463, 0.203685563865404,
           0.214828905505821, 0.327528699634624]
     ]
+    ref_PBE = [
+        [-0.176359177927043,  0.260985873115544, 0.261899395218627,
+          0.263622297064375, 0.356665141045067],
+        [-0.020990100466132, -0.019336621838601, 0.126408382481059,
+          0.127120616865171, 0.381234741715688],
+        [-0.068172213736400,  0.012196449791486, 0.126067212751612,
+          0.191260685884426, 0.330122088598419],
+        [-0.089553080426591,  0.007368147478294, 0.204301319667665,
+          0.215665295755819, 0.330614871561161],
+    ]
 
     ene_ref_noXC = Dict{String, Float64}(
         "e1e_loc" => -1.7783908803,
@@ -419,15 +483,29 @@ function quicktest_silicon()
         "e2e"     =>  0.4285114176,
         "total"   =>  3.1661644264,
     )
-    ene_ref = Dict{String, Float64}(
-        "e1e_loc" => -2.1757127578,
-        "kinetic" =>  3.2107081817,
-        "e_nloc"  =>  1.5804553245,
-        "e2e"     => -1.8327072303,
-        "e_core"  => -0.2946220670,
+    ene_ref_LDA = Dict{String, Float64}(
+        "e1e_loc"   => -2.1757127578,
+        "kinetic"   =>  3.2107081817,
+        "e_nloc"    =>  1.5804553245,
+        "e2e"       => -1.8327072303,
+        "e_core"    => -0.2946220670,
         "e_nuclear" => -8.3978935784,
-        "total"   =>  -7.9097721273,
+        "total"     => -7.9097721273,
     )
+    ene_ref_PBE = Dict{String, Float64}(
+        "e1e_loc"   => -2.2044334973,
+        "kinetic"   =>  3.2453959326,
+        "e_nloc"    =>  1.5641151261,
+        "e2e"       => -1.8404441761,
+        "e_core"    => -0.2946220670,
+        "e_nuclear" => -8.3978935784,
+        "total"     => -7.9278822601,
+    )
+
+    ref = ref_LDA
+    ene_ref = ene_ref_LDA
+    # ref = ref_PBE
+    # ene_ref = ene_ref_PBE
 
     Z = 14
     a = 5.431020504 * ÅtoBohr
@@ -447,14 +525,14 @@ function quicktest_silicon()
     @assert maximum(abs.(imag(H))) < 1e-12
 
     xc = Functional.(["lda_x", "lda_c_vwn"])
+    # xc = Functional.(["gga_x_pbe", "gga_c_pbe"])
     Ham = Hamiltonian(pw, silicon, psp, xc)
     Ham, ene = self_consistent_field!(Ham, bzmesh, occupation, n_bands=4, tol=1e-8)
-    potential_2e_real = solve_poisson(pw, Ham.ρ) + compute_xc(xc, Ham.ρ)
+    potential_2e_real = solve_poisson(pw, Ham.ρ) + compute_xc(pw, xc, Ham.ρ)
 
     pw = substitute_kpoints(pw, kpoints)
     λs, vs = compute_bands(pw, silicon, potential_2e_real, psp=psp, n_bands=5)
 
-    # ref = ref_noXC
     for i in 1:length(ref)
         println("eval $i ", λs[i] - ref[i])
         @assert maximum(abs.(ref[i] - λs[i])[1:4]) < 5e-5
@@ -495,9 +573,10 @@ function bands_silicon()
 
     # Run SCF to minimise wrt. density and get final 2e potential
     xc = Functional.(["lda_x", "lda_c_vwn"])
+    # xc = Functional.(["gga_x_pbe", "gga_c_pbe"])
     H = Hamiltonian(pw, silicon, psp, xc)
     H, ene = self_consistent_field!(H, bzmesh, occupation, n_bands=8, tol=1e-6)
-    potential_2e_real = solve_poisson(pw, H.ρ) + compute_xc(H.xc, H.ρ)
+    potential_2e_real = solve_poisson(pw, H.ρ) + compute_xc(pw, H.xc, H.ρ)
 
     #
     # Compute and plot bands
@@ -527,6 +606,58 @@ function dump_bandstructure(kpath, λs, file)
             @printf(fp, "%20.12f%20.12f%20.12f%20.12f%20.12f%20.12f\n", acculen, λ...)
         end
     end
+end
+
+
+function test_gradient()
+    Ecut = 0.5
+    # Ecut = 2
+    Ecut = 7
+    # Ecut = 20
+    center = [0., 0., 0.]
+    system = build_system_simple_cubic(16.0, [center], [1.])
+    pw = PlaneWaveBasis(system, [[0., 0., 0.]], Ecut)
+
+    σ = 0.5
+    gaussian(r::Vector, σ::Number) = exp(-dot(r, r) / (2σ^2)) / sqrt(2π * σ^2)^3
+    function gaussian_diff(r::Vector, σ::Number, i::Int)
+        2 * r[i] * exp(-dot(r, r) / (2σ^2)) / (2σ^2 * sqrt(2π * σ^2)^3)
+    end
+
+    f    = zeros(pw.fft_size...)
+    ∂f_x = zeros(pw.fft_size...)
+    ∂f_y = zeros(pw.fft_size...)
+    ∂f_z = zeros(pw.fft_size...)
+
+    println("length R:  ",  length(pw.Rs))
+    for ijk in CartesianIndices(f)
+        r = pw.Rs[ijk] .- center
+        f[ijk] = gaussian(r, σ)
+        ∂f_x[ijk] = gaussian_diff(r, σ, 1)
+        ∂f_y[ijk] = gaussian_diff(r, σ, 2)
+        ∂f_z[ijk] = gaussian_diff(r, σ, 3)
+    end
+
+    dVol = pw.unit_cell_volume / prod(pw.fft_size)
+    ∇f = compute_gradient(pw, f)
+    norm∇f = sum(∇f[i] .* ∇f[i] for i in 1:3)
+    norm∂f = sum(∂f_x .* ∂f_x .+ ∂f_y .* ∂f_y .+ ∂f_z .* ∂f_z)
+
+    println("∫f       = $(sum(f) * dVol)")
+    println("∫∂f_x    = $(sum(∂f_x) * dVol)")
+    println("∫∇f_x    = $(sum(∇f[1]) * dVol)")
+
+    println("∫||∇f||  = $(sum(norm∇f) * dVol)")
+    println("∫||∂f||  = $(sum(norm∂f) * dVol)")
+    println()
+
+    println("diff x   = $(sum(abs.(∂f_x - ∇f[1])))")
+    println("diff y   = $(sum(abs.(∂f_y - ∇f[2])))")
+    println("diff z   = $(sum(abs.(∂f_z - ∇f[3])))")
+
+    println("diff x = ", sum(∇f[1] - ∂f_x) )
+    println("diff y = ", sum(∇f[2] - ∂f_y) )
+    println("diff z = ", sum(∇f[3] - ∂f_z) )
 end
 
 main() = bands_silicon()

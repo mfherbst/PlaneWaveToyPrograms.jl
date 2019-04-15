@@ -163,7 +163,7 @@ end
 Evaluate the energy of a GGA functional
 
 ρ      Density on the grid
-σ      Contracted density gradient (∇ρ \cdot ∇ρ) on a grid
+σ      Contracted density gradient (∇ρ ⋅ ∇ρ) on a grid
 """
 function evaluate_gga_energy(func::Functional, ρ::Array{Float64, 3}, σ::Array{Float64, 3})
     @assert func.family == FunctionalFamily(2)
