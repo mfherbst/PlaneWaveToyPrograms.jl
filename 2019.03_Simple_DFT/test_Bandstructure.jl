@@ -521,7 +521,7 @@ function dump_bandstructure(kpath, λs, file)
         for (i, acculen) in enumerate(kpath.accumulated_arclength)
             @assert length(λs[i]) ≥ 5
             λ = λs[i][1:5]
-            @printf(fp, "%20.12f%20.12f%20.12f%20.12f%20.12f\n", acculen, λ...)
+            @printf(fp, "%20.12f%20.12f%20.12f%20.12f%20.12f%20.12f\n", acculen, λ...)
         end
     end
 end
