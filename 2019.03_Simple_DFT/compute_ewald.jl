@@ -131,7 +131,7 @@ function compute_ewald(system::System; Zs=nothing, η=nothing)
         end # R
     end
 
-    println("gsh = $(gsh)    rsh = $(rsh)")
+    # println("gsh = $(gsh)    rsh = $(rsh)")
 
     # Return total sum, amended by 1/2 (because of double counting)
     (sum_recip + sum_real) / 2

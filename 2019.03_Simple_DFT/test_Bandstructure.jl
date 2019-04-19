@@ -15,6 +15,7 @@ using PyPlot
 using ProgressMeter
 using IterativeSolvers
 import IterativeSolvers: LOBPCGResults
+using NLsolve
 
 # XXX
 # TODO  Report on choleski error in LOBPCG
@@ -186,6 +187,26 @@ end
 #
 # SCF
 #
+function dummy_interpolate(pw::PlaneWaveBasis, ioldk, inewk, data_oldk)
+    n_bands = size(data_oldk, 2)
+    n_oldk = length(pw.Gmask[ioldk])
+    n_newk = length(pw.Gmask[inewk])
+    @assert n_oldk == size(data_oldk, 1)
+
+    res = zeros(eltype(data_oldk), n_newk, n_bands)
+    idx_new_in_old = indexin(pw.Gmask[inewk], pw.Gmask[ioldk])
+    for (inew, iold) in enumerate(idx_new_in_old)
+        if ! isnothing(iold)
+            # element inew is contained in old at position iold
+            res[inew, :] = data_oldk[iold, :]
+        end
+    end
+
+    # TODO orthonormalise res
+
+    res
+end
+
 function lobpcg_full(H::Hamiltonian, largest::Bool, n_bands::Int;
                 preconditioner=nothing, guess=nothing, kwargs...)
     n_k = length(H.blocks)
@@ -201,10 +222,13 @@ function lobpcg_full(H::Hamiltonian, largest::Bool, n_bands::Int;
             @assert size(guess[ik], 2) == n_bands
             @assert size(guess[ik], 1) == size(Hk, 2)
             res[ik] = lobpcg(Hk, largest, guess[ik], P=P; kwargs...)
+        elseif ik > 1
+            gk = dummy_interpolate(H.pw, ik - 1, ik, res[ik - 1].X)
+            res[ik] = lobpcg(Hk, largest, gk, n_bands, P=P; kwargs...)
         else
             res[ik] = lobpcg(Hk, largest, n_bands, P=P; kwargs...)
         end
-        println("lobpcg $ik niter: $(res[ik].iterations) converged: $(res[ik].converged)")
+        println("    lobpcg $ik niter: $(res[ik].iterations) converged: $(res[ik].converged)")
         @assert all(res[ik].converged)
     end
     res
@@ -265,11 +289,68 @@ function compute_density_stupid(pw::PlaneWaveBasis, bzmesh::BrilloinZoneMesh,
     ρ
 end
 
+"""
+Map finding the next density ρ in an SCF cycle
+
+H           Hamiltonian, modified
+Psi         guess / last result of lobpcg, modified
+ene_old     Dict of recent energies, modified
+ρ           density guess (from nlsolve)
+bzmesh      Brilloin Zone Mesh
+occs        occupation
+tol_lobpcg  tolerance for LOBPCG convergence
+"""
+function scf_map!(H::Hamiltonian, Psi, ene_old, ρ, bzmesh, occs, tol_lobpcg)
+    ρ = reshape(ρ, H.pw.fft_size...)
+
+    println("---------\n")
+
+    n_bands = size(Psi[1], 2)
+    n_k = length(Psi)
+    @assert n_k == length(H.blocks)
+
+    # Update Hamiltonian and find its bands
+    H = substitute_density!(H, copy(ρ))
+    make_precond(Hk) = KineticPreconditionerBlock(Hk, α=0.1)
+    largest = false
+    res = lobpcg_full(H, largest, n_bands, tol=tol_lobpcg,
+                      guess=Psi, preconditioner=make_precond)
+
+    @assert length(res) == n_k
+    for i in 1:n_k
+        Psi[i] .= res[i].X
+    end
+    println("\n    lobpcg evals:")
+    for (i, st) in enumerate(res)
+        println("    $i  $(real(st.λ))")
+    end
+
+    # Compute new density and new energies
+    ρ = compute_density_stupid(H.pw, bzmesh, Psi, occs, lobpcg_tol=tol_lobpcg)
+    H = substitute_density!(H, ρ)
+    ene = compute_energy(H, bzmesh, Psi, occs)
+
+    # Display convergence
+    diff = ene["total"] - ene_old["total"]
+    println()
+    for key in keys(ene)
+        if key != "total"
+            @printf("    %10s =  %16.10g\n", key, ene[key])
+        end
+    end
+    @printf("    %10s =  %16.10g\n", "total", ene["total"])
+    @printf("    %10s =  %16.10g\n", "Δtotal", diff)
+
+    for k in keys(ene) ene_old[k] = ene[k] end
+    println("    \n---------")
+
+    return reshape(ρ, prod(H.pw.fft_size))
+end
 
 function self_consistent_field!(H::Hamiltonian, bzmesh::BrilloinZoneMesh,
-                                occupation::Vector{Float64};
-                                n_bands::Int=sum(occupation .> 0),
-                                PsiGuess=nothing, tol=1e-6)
+                                       occupation::Vector{Float64};
+                                       n_bands::Int=sum(occupation .> 0),
+                                       PsiGuess=nothing, tol=1e-6)
     @assert n_bands ≥ length(occupation)
 
     if n_bands > length(occupation)
@@ -279,59 +360,36 @@ function self_consistent_field!(H::Hamiltonian, bzmesh::BrilloinZoneMesh,
         occs = occupation
     end
 
-    ene_old = NaN
     Psi = nothing
-    if PsiGuess != nothing
-        Psi = PsiGuess
-        @assert size(PsiGuess[1], 2) == n_bands
-        ene_old = compute_energy(H, bzmesh, Psi, occs)["total"]
-        println("Starting ene:       $(ene_old)")
-    end
-
-    β_mix = 0.3
-    ρ_old = H.ρ
-    for i in 1:100
-        println("#\n# SCF iter $i\n#")
+    if PsiGuess == nothing
         make_precond(Hk) = KineticPreconditionerBlock(Hk, α=0.1)
         largest = false
-        res = lobpcg_full(H, largest, n_bands, tol=tol / 100,
-                          guess=Psi, preconditioner=make_precond)
-        Psi = [st.X for st in res]
-        println("\nlobpcg evals:")
-        for (i, st) in enumerate(res)
-            println("$i  $(real(st.λ))")
-        end
-
-        ρ = compute_density_stupid(H.pw, bzmesh, Psi, occs, lobpcg_tol=tol / 100)
-        H = substitute_density!(H, ρ)
-        ene = compute_energy(H, bzmesh, Psi, occupation)
-
-        # Display convergence
-        diff = ene["total"] - ene_old
-        println()
-        for key in keys(ene)
-            if key != "total"
-                @printf("%10s =  %16.10g\n", key, ene[key])
-            end
-        end
-        @printf("%10s =  %16.10g\n", "total", ene["total"])
-        @printf("%10s =  %16.10g\n", "Δtotal", diff)
-        if abs(diff) < tol
-            println("\n#\n#-- SCF converged\n#")
-            return H, ene
-        end
-
-        if norm(ρ_old) > 0
-            ρ = β_mix * H.ρ + (1 - β_mix) * ρ_old
-            H = substitute_density!(H, ρ)
-        end
-
-        ene_old = ene["total"]
-        ρ_old = ρ
-
-        println()
+        res = lobpcg_full(H, largest, n_bands, tol=tol,
+                          preconditioner=make_precond)
+        Psi = [sf.X for sf in res]
+    else
+        Psi = PsiGuess
     end
-    return H, Dict(String, Float64)("total" => ene_old)
+    @assert size(Psi[1], 2) == n_bands
+    ene = compute_energy(H, bzmesh, Psi, occs)
+    println("Starting ene:       $(ene["total"])")
+
+    # Compute starting density
+    ρ = compute_density_stupid(H.pw, bzmesh, Psi, occs, lobpcg_tol=10 * tol)
+
+    # Function to compute residual for nlsolve
+    function compute_residual!(residual, ρ)
+        tol_lobpcg = tol / 100
+        residual .= (scf_map!(H, Psi, ene, ρ, bzmesh, occs, tol_lobpcg) - ρ)
+    end
+    res = nlsolve(compute_residual!, ρ, method=:anderson, m=5, xtol=tol,
+                  ftol=0.0, show_trace=true)
+    @assert converged(res)
+    println("\n#\n#-- SCF converged\n#")
+
+    ρ = res.zero
+    H = substitute_density!(H, ρ)
+    return H, ene
 end
 
 
